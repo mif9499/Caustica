@@ -39,7 +39,7 @@ if (Test-Path -LiteralPath $ngxShim) {
 
 Push-Location $upscalerRoot
 try {
-	$env:JAVA_TOOL_OPTIONS='-Dupscaler.backend=dlss -Dupscaler.dlss.quality=0 -Dupscaler.fsrDebugView=true -Dupscaler.renderScale=0.5'
+	$env:JAVA_TOOL_OPTIONS='-Dupscaler.backend=dlss -Dupscaler.fsrDebugView=true -Dupscaler.renderScale=0.5 -Dupscaler.dlss.preset=13'
 	.\gradlew.bat --stop
 	.\gradlew.bat runClient
 } finally {

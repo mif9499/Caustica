@@ -3,6 +3,7 @@ package dev.upscaler.mixin;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.upscaler.client.DlssPipeline;
 import dev.upscaler.client.FsrPipeline;
+import dev.upscaler.client.UpscalerJitter;
 import dev.upscaler.client.WorldRenderScaler;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
@@ -66,8 +67,8 @@ public abstract class GameRendererMixin {
 		FsrPipeline.INSTANCE.captureFrame(projection, cameraState.viewRotationMatrix, cameraState.pos, cameraState.depthFar);
 		DlssPipeline.INSTANCE.captureFrame(projection, cameraState.viewRotationMatrix, cameraState.pos);
 
-		float jx = FsrPipeline.INSTANCE.jitterNdcX();
-		float jy = FsrPipeline.INSTANCE.jitterNdcY();
+		float jx = UpscalerJitter.INSTANCE.jitterNdcX();
+		float jy = UpscalerJitter.INSTANCE.jitterNdcY();
 		if (jx == 0.0f && jy == 0.0f) {
 			return projection;
 		}

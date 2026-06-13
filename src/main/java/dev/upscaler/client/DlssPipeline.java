@@ -64,10 +64,29 @@ public final class DlssPipeline {
 	private static final int FEATURE_FLAG_DEPTH_INVERTED = 1 << 3;
 	private static final int FEATURE_FLAG_AUTO_EXPOSURE = 1 << 6;
 
+	// NVSDK_NGX_DLSS_Hint_Render_Preset_K (transformer model, best image quality).
+	// 0 = let the DLL pick its per-mode default.
+	private static final int RENDER_PRESET_K = 11;
+
 	private final boolean enabledByProperty = !"false".equalsIgnoreCase(System.getProperty("upscaler.dlss", "true"));
 	private final int qualityMode = Integer.getInteger("upscaler.dlss.quality", QUALITY_MAX_QUALITY);
+	private final int renderPreset = Integer.getInteger("upscaler.dlss.preset", RENDER_PRESET_K);
 	private final float mvScaleX = Float.parseFloat(System.getProperty("upscaler.mvScaleX", "0.5"));
 	private final float mvScaleY = Float.parseFloat(System.getProperty("upscaler.mvScaleY", "0.5"));
+
+	// DLSS uses the opposite Y jitter convention to FSR under Vulkan's flipped clip
+	// space: the shared projection jitter stays at FSR's validated sign, and DLSS is
+	// reported a negated Y so its reconstruction stays consistent. (Verified: with
+	// the shared projection flipped to +Y the shimmer collapsed; doing it per-backend
+	// here keeps FSR correct too.)
+	private final float jitterSignX = Float.parseFloat(System.getProperty("upscaler.dlss.jitterSignX", "1"));
+	private final float jitterSignY = Float.parseFloat(System.getProperty("upscaler.dlss.jitterSignY", "-1"));
+
+	// Minecraft is LDR (color already in [0,1]), so DLSS auto-exposure is both
+	// unnecessary and a shimmer source: with jittered input the per-frame exposure
+	// estimate fluctuates, flickering a stable scene — which the sharpest presets
+	// (M) reveal and softer ones (K) hide. Default OFF; preExposure stays 1.0.
+	private final boolean autoExposure = Boolean.parseBoolean(System.getProperty("upscaler.dlss.autoExposure", "false"));
 
 	private boolean failed;
 	private boolean initialized;
@@ -344,9 +363,12 @@ public final class DlssPipeline {
 			}
 
 			if (isNull(this.feature)) {
-				int flags = FEATURE_FLAG_MV_LOW_RES | FEATURE_FLAG_DEPTH_INVERTED | FEATURE_FLAG_AUTO_EXPOSURE;
+				int flags = FEATURE_FLAG_MV_LOW_RES | FEATURE_FLAG_DEPTH_INVERTED;
+				if (this.autoExposure) {
+					flags |= FEATURE_FLAG_AUTO_EXPOSURE;
+				}
 				this.feature = this.lib.createDlss(cmd.address(), renderWidth, renderHeight, displayWidth, displayHeight,
-						this.qualityMode, flags);
+						this.qualityMode, flags, this.renderPreset);
 				if (isNull(this.feature)) {
 					throw new IllegalStateException("ngxshim_create_dlss failed: last=0x"
 							+ Integer.toHexString(this.lib.lastResult()));
@@ -361,7 +383,8 @@ public final class DlssPipeline {
 					vkImageView(this.mvTextureView), vkImage(this.mvTexture), VK10.VK_FORMAT_R16G16_SFLOAT,
 					this.outputImageView, this.outputImage, VK10.VK_FORMAT_R8G8B8A8_UNORM,
 					renderWidth, renderHeight, displayWidth, displayHeight,
-					FsrPipeline.INSTANCE.jitterPixelsX(), FsrPipeline.INSTANCE.jitterPixelsY(),
+					UpscalerJitter.INSTANCE.jitterPixelsX() * this.jitterSignX,
+					UpscalerJitter.INSTANCE.jitterPixelsY() * this.jitterSignY,
 					mvValid ? renderWidth * this.mvScaleX : 1.0f,
 					mvValid ? renderHeight * this.mvScaleY : 1.0f,
 					this.resetNextDispatch ? 1 : 0, frameTimeMs);

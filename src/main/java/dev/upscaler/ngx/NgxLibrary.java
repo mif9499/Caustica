@@ -45,10 +45,10 @@ public final class NgxLibrary {
 		this.queryOptimal = handle(lookup, "ngxshim_query_optimal",
 				FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
 						ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-		// void* ngxshim_create_dlss(VkCommandBuffer, u32 rw, u32 rh, u32 dw, u32 dh, int quality, int flags)
+		// void* ngxshim_create_dlss(VkCommandBuffer, u32 rw, u32 rh, u32 dw, u32 dh, int quality, int flags, int preset)
 		this.createDlss = handle(lookup, "ngxshim_create_dlss",
 				FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
-						ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+						ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
 		// int ngxshim_evaluate(cmd, feature, [color/depth/mv/out: view,img,fmt]*4, rw,rh,dw,dh, jx,jy,mvsx,mvsy, reset, frameMs)
 		this.evaluate = handle(lookup, "ngxshim_evaluate",
 				FunctionDescriptor.of(ValueLayout.JAVA_INT,
@@ -115,10 +115,10 @@ public final class NgxLibrary {
 	}
 
 	public MemorySegment createDlss(long cmd, int renderWidth, int renderHeight, int displayWidth, int displayHeight,
-	                                int quality, int featureFlags) {
+	                                int quality, int featureFlags, int renderPreset) {
 		try {
 			return (MemorySegment) this.createDlss.invokeExact(cmd, renderWidth, renderHeight, displayWidth, displayHeight,
-					quality, featureFlags);
+					quality, featureFlags, renderPreset);
 		} catch (Throwable t) {
 			throw new RuntimeException("ngxshim_create_dlss failed", t);
 		}

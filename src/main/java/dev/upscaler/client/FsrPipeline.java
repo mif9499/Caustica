@@ -413,7 +413,7 @@ public final class FsrPipeline {
 							renderWidth, renderHeight, FfxUpscaleContext.USAGE_READ_ONLY, FfxUpscaleContext.STATE_COMMON),
 					new FfxUpscaleContext.Resource(this.outputImage, FfxUpscaleContext.FORMAT_R8G8B8A8_UNORM,
 							upscaleWidth, upscaleHeight, FfxUpscaleContext.USAGE_UAV, FfxUpscaleContext.STATE_UNORDERED_ACCESS),
-					this.jitterPixelsX, this.jitterPixelsY,
+					UpscalerJitter.INSTANCE.jitterPixelsX(), UpscalerJitter.INSTANCE.jitterPixelsY(),
 					// NDC-delta (span 2) -> render-res texels: dimension/2 (see mvScaleX docs)
 					mvValid ? renderWidth * this.mvScaleX : 1.0f,
 					mvValid ? renderHeight * this.mvScaleY : 1.0f,

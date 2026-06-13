@@ -142,16 +142,28 @@ NGX_SHIM_EXPORT int ngxshim_query_optimal(unsigned int displayWidth, unsigned in
 }
 
 // Creates a DLSS feature. cmd must be an open, recording command buffer.
-// Returns an opaque feature pointer, or NULL on failure (see ngxshim_last_result).
+// renderPreset is an NVSDK_NGX_DLSS_Hint_Render_Preset value (0 = let the DLL
+// choose its per-mode default; 11 = Preset K, the transformer model). Returns an
+// opaque feature pointer, or NULL on failure (see ngxshim_last_result).
 NGX_SHIM_EXPORT void* ngxshim_create_dlss(VkCommandBuffer cmd,
                                           unsigned int renderWidth, unsigned int renderHeight,
                                           unsigned int displayWidth, unsigned int displayHeight,
-                                          int quality, int featureFlags) {
+                                          int quality, int featureFlags, int renderPreset) {
     NVSDK_NGX_Parameter* params = nullptr;
     NVSDK_NGX_Result r = NVSDK_NGX_VULKAN_AllocateParameters(&params);
     g_lastResult = (int) r;
     if (NVSDK_NGX_FAILED(r)) {
         return nullptr;
+    }
+
+    if (renderPreset != 0) {
+        unsigned int preset = (unsigned int) renderPreset;
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, preset);
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, preset);
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, preset);
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, preset);
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, preset);
+        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, preset);
     }
 
     NVSDK_NGX_DLSS_Create_Params createParams;

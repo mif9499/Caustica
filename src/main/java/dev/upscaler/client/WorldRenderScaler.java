@@ -84,7 +84,7 @@ public final class WorldRenderScaler {
 		int renderWidth = Math.max(1, Math.round(mainTarget.width * this.scale));
 		int renderHeight = Math.max(1, Math.round(mainTarget.height * this.scale));
 		ensureLowResTargets(renderWidth, renderHeight);
-		FsrPipeline.INSTANCE.prepareFrameJitter(renderWidth, renderHeight, mainTarget.width);
+		UpscalerJitter.INSTANCE.prepare(renderWidth, renderHeight, mainTarget.width);
 
 		var accessor = (RenderTargetAccessor) mainTarget;
 		this.savedColor = accessor.upscaler$getColorTexture();
