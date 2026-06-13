@@ -412,6 +412,11 @@ public final class FsrPipeline {
 	}
 
 	private static long vkImage(GpuTexture texture) {
+		Long sodiumHandle = SodiumCompat.vkImage(texture);
+		if (sodiumHandle != null) {
+			return sodiumHandle;
+		}
+
 		return ((VulkanGpuTextureAccessor) texture).upscaler$getVkImage();
 	}
 
