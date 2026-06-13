@@ -15,6 +15,16 @@ public final class SodiumCompat {
 			"VK_KHR_get_memory_requirements2",
 			"VK_KHR_dedicated_allocation");
 
+	// Extensions NGX/DLSS requires at device/instance creation (queried via the
+	// NGX shim; NVIDIA-only, requested optionally so non-NVIDIA devices degrade).
+	private static final List<String> NGX_DEVICE_EXTENSIONS = List.of(
+			"VK_NVX_binary_import",
+			"VK_NVX_image_view_handle",
+			"VK_EXT_buffer_device_address",
+			"VK_KHR_push_descriptor");
+	private static final List<String> NGX_INSTANCE_EXTENSIONS = List.of(
+			"VK_KHR_get_physical_device_properties2");
+
 	private static final boolean SODIUM_LOADED = FabricLoader.getInstance().isModLoaded("sodium");
 	private static boolean extensionRegistrationAttempted;
 	private static boolean loggedMissingApi;
@@ -36,16 +46,25 @@ public final class SodiumCompat {
 			Class<?> apiClass = Class.forName("net.caffeinemc.mods.sodium.api.gpu.SodiumGpuApi");
 			Object registry = apiClass.getMethod("extensions").invoke(null);
 			Method requestDeviceExtension = registry.getClass().getMethod("requestDeviceExtension", String.class, boolean.class);
+			Method requestInstanceExtension = registry.getClass().getMethod("requestInstanceExtension", String.class);
 
+			// FFX (required when present) — needed by the FSR runtime.
 			for (String extension : FFX_DEVICE_EXTENSIONS) {
 				requestDeviceExtension.invoke(registry, extension, true);
 			}
+			// NGX/DLSS (optional — NVIDIA-only; absent on other vendors).
+			for (String extension : NGX_DEVICE_EXTENSIONS) {
+				requestDeviceExtension.invoke(registry, extension, false);
+			}
+			for (String extension : NGX_INSTANCE_EXTENSIONS) {
+				requestInstanceExtension.invoke(registry, extension);
+			}
 
-			UpscalerMod.LOGGER.info("Registered FFX Vulkan device extensions through Sodium");
+			UpscalerMod.LOGGER.info("Registered FFX + NGX Vulkan extensions through Sodium");
 		} catch (ClassNotFoundException | NoSuchMethodException e) {
 			logMissingApi();
 		} catch (IllegalAccessException | InvocationTargetException e) {
-			UpscalerMod.LOGGER.warn("Failed to register FFX Vulkan device extensions through Sodium", e);
+			UpscalerMod.LOGGER.warn("Failed to register Vulkan extensions through Sodium", e);
 		}
 	}
 

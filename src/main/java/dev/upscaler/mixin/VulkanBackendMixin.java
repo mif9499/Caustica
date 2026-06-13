@@ -35,8 +35,16 @@ import java.util.List;
 @Mixin(VulkanBackend.class)
 public abstract class VulkanBackendMixin {
 	private static final List<String> UPSCALER_WANTED_EXTENSIONS = List.of(
+			// FFX (FSR)
 			"VK_KHR_get_memory_requirements2",
-			"VK_KHR_dedicated_allocation");
+			"VK_KHR_dedicated_allocation",
+			// NGX (DLSS) — NVIDIA-only; skipped on other vendors. (The NGX instance
+			// extension VK_KHR_get_physical_device_properties2 needs an instance hook;
+			// without Sodium, DLSS relies on it being core/enabled at instance level.)
+			"VK_NVX_binary_import",
+			"VK_NVX_image_view_handle",
+			"VK_EXT_buffer_device_address",
+			"VK_KHR_push_descriptor");
 
 	private static final boolean SODIUM_OWNS_NEGOTIATION =
 			FabricLoader.getInstance().isModLoaded("sodium");

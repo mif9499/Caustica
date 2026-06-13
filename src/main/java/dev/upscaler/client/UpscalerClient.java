@@ -15,7 +15,9 @@ public final class UpscalerClient implements ClientModInitializer {
 		// start runs on the render thread with the device idle between frames.
 		ClientTickEvents.START_CLIENT_TICK.register(client -> {
 			if (!smokeTestDone) {
-				smokeTestDone = FsrSmokeTest.run();
+				FsrSmokeTest.run();
+				DlssSmokeTest.run();
+				smokeTestDone = true;
 			}
 		});
 	}
