@@ -105,7 +105,8 @@ public final class RtPipeline {
             VkPipelineLayoutCreateInfo plci = VkPipelineLayoutCreateInfo.calloc(stack).sType$Default().pSetLayouts(stack.longs(dsl));
             if (pushConstantSize > 0) {
                 VkPushConstantRange.Buffer pcr = VkPushConstantRange.calloc(1, stack)
-                        .stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR).offset(0).size(pushConstantSize);
+                        .stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)
+                        .offset(0).size(pushConstantSize);
                 plci.pPushConstantRanges(pcr);
             }
             check(VK10.vkCreatePipelineLayout(vk, plci, null, p), "vkCreatePipelineLayout");
@@ -185,7 +186,8 @@ public final class RtPipeline {
             VK10.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout, 0, stack.longs(descriptorSet), null);
             if (pushConstants != null && pushConstantSize > 0) {
-                VK10.vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_RAYGEN_BIT_KHR, 0, pushConstants);
+                VK10.vkCmdPushConstants(cmd, pipelineLayout,
+                        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, 0, pushConstants);
             }
             VkStridedDeviceAddressRegionKHR raygen = VkStridedDeviceAddressRegionKHR.calloc(stack)
                     .deviceAddress(sbt.deviceAddress).stride(sbtStride).size(sbtStride);

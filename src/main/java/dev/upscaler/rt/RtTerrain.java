@@ -29,6 +29,7 @@ public final class RtTerrain {
 
     private final RtBuffer positions;
     private final RtBuffer indices;
+    private final RtBuffer normals;
     private final RtAccel blas;
     private final RtAccel tlas;
     /** World block coordinates of the rebase origin (geometry is stored relative to this). */
@@ -36,9 +37,10 @@ public final class RtTerrain {
     public final int blockY;
     public final int blockZ;
 
-    private RtTerrain(RtBuffer positions, RtBuffer indices, RtAccel blas, RtAccel tlas, int bx, int by, int bz) {
+    private RtTerrain(RtBuffer positions, RtBuffer indices, RtBuffer normals, RtAccel blas, RtAccel tlas, int bx, int by, int bz) {
         this.positions = positions;
         this.indices = indices;
+        this.normals = normals;
         this.blas = blas;
         this.tlas = tlas;
         this.blockX = bx;
@@ -52,6 +54,11 @@ public final class RtTerrain {
 
     public long tlas() {
         return tlas.handle;
+    }
+
+    /** Device address of the per-primitive normal buffer (one vec4 per triangle), for the hit shader. */
+    public long normalAddress() {
+        return normals.deviceAddress;
     }
 
     /** Extract once the player is in a world. Returns true on success (then it's a no-op until rebuilt). */
@@ -71,6 +78,7 @@ public final class RtTerrain {
 
         FloatArrayList verts = new FloatArrayList();
         IntArrayList idx = new IntArrayList();
+        FloatArrayList normalList = new FloatArrayList();
         BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
         int faces = 0;
 
@@ -96,7 +104,7 @@ public final class RtTerrain {
                             }
                             m.set(nx, ny, nz);
                             if (level.getBlockState(m).isAir()) {
-                                emitFace(verts, idx, dx, dy, dz, axis, val);
+                                emitFace(verts, idx, normalList, dx, dy, dz, axis, val);
                                 faces++;
                             }
                         }
@@ -115,8 +123,11 @@ public final class RtTerrain {
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         RtBuffer positions = ctx.createBuffer((long) verts.size() * Float.BYTES, asInput, true);
         RtBuffer indices = ctx.createBuffer((long) idx.size() * Integer.BYTES, asInput, true);
+        RtBuffer normalBuffer = ctx.createBuffer((long) normalList.size() * Float.BYTES,
+                org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
         MemoryUtil.memFloatBuffer(positions.mapped, verts.size()).put(verts.elements(), 0, verts.size());
         MemoryUtil.memIntBuffer(indices.mapped, idx.size()).put(idx.elements(), 0, idx.size());
+        MemoryUtil.memFloatBuffer(normalBuffer.mapped, normalList.size()).put(normalList.elements(), 0, normalList.size());
 
         RtAccel blas = RtAccel.buildTrianglesBlas(ctx, positions, vertCount, indices, idxCount);
         float[] identity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
@@ -125,14 +136,14 @@ public final class RtTerrain {
         if (instance != null) {
             instance.destroy();
         }
-        instance = new RtTerrain(positions, indices, blas, tlas, cx, cy, cz);
+        instance = new RtTerrain(positions, indices, normalBuffer, blas, tlas, cx, cy, cz);
         UpscalerMod.LOGGER.info("RT terrain: extracted {} faces ({} verts / {} indices) from {}^3 blocks around ({},{},{}); BLAS+TLAS built",
                 faces, vertCount, idxCount, 2 * RADIUS + 1, cx, cy, cz);
         return true;
     }
 
     /** Emit one unit-cube face at block-local origin (bx,by,bz) on the given axis (0=x,1=y,2=z) at val (0 or 1). */
-    private static void emitFace(FloatArrayList verts, IntArrayList idx, int bx, int by, int bz, int axis, int val) {
+    private static void emitFace(FloatArrayList verts, IntArrayList idx, FloatArrayList normals, int bx, int by, int bz, int axis, int val) {
         int base = verts.size() / 3;
         int a = (axis + 1) % 3;
         int b = (axis + 2) % 3;
@@ -153,11 +164,24 @@ public final class RtTerrain {
         idx.add(base);
         idx.add(base + 2);
         idx.add(base + 3);
+
+        // Per-primitive (per-triangle) face normal, indexed by gl_PrimitiveID. Two triangles/face.
+        float s = val == 1 ? 1f : -1f;
+        float nx = axis == 0 ? s : 0f;
+        float ny = axis == 1 ? s : 0f;
+        float nz = axis == 2 ? s : 0f;
+        for (int t = 0; t < 2; t++) {
+            normals.add(nx);
+            normals.add(ny);
+            normals.add(nz);
+            normals.add(0f);
+        }
     }
 
     public void destroy() {
         tlas.destroy();
         blas.destroy();
+        normals.destroy();
         indices.destroy();
         positions.destroy();
         if (instance == this) {
