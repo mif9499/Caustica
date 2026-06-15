@@ -37,7 +37,11 @@ public final class RtComposite {
     /** Blend weight of RT over vanilla: 0 = vanilla only, 1 = RT only. {@code -Dupscaler.rt.blend}. */
     public static final float BLEND = parseBlend();
 
-    private static final int WORLD_PUSH_SIZE = 92; // invViewProj(64) + camOffset(@64) + sectionTableAddr(@80) + accumFrame(@88)
+    private static final int WORLD_PUSH_SIZE = 96; // invViewProj(64) + camOffset(@64) + sectionTableAddr(@80) + accumFrame(@88) + debugView(@92)
+    private static final int GUIDE_COUNT = 3; // P4 guide buffers bound at world-pipeline bindings 3..5
+
+    /** Debug guide-buffer view: 0 = normal render, 1 = normals, 2 = albedo, 3 = depth, 4 = roughness. */
+    public static final int DEBUG_VIEW = Integer.getInteger("upscaler.rt.debugView", 0);
 
     private static float parseBlend() {
         try {
@@ -59,6 +63,10 @@ public final class RtComposite {
     private RtBlendPipeline blendPipeline;
     private RtImage output;
     private RtImage baseCopy;
+    // P4 guide buffers (first-hit attributes for the denoiser/DLSS-RR): normal+roughness, albedo, depth.
+    private RtImage gNormal;
+    private RtImage gAlbedo;
+    private RtImage gDepth;
     private long boundTriangleTlas;
     private long boundWorldTlas;
     private long atlasSampler;
@@ -139,9 +147,10 @@ public final class RtComposite {
         if (worldPipeline == null) {
             worldPipeline = RtPipeline.create(ctx, "world.rgen.spv",
                     new String[]{"world.rmiss.spv", "shadow.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
-                    WORLD_PUSH_SIZE, true);
+                    WORLD_PUSH_SIZE, true, GUIDE_COUNT);
             if (output != null) {
                 worldPipeline.setStorageImage(output.view);
+                bindGuideImages();
             }
             worldPipeline.setAtlasSampler(blockAtlasView(), atlasSampler(ctx));
         }
@@ -168,6 +177,31 @@ public final class RtComposite {
         return trianglePipeline;
     }
 
+    /** Bind the three guide buffers into the world pipeline's extra storage-image slots (0..2). */
+    private void bindGuideImages() {
+        if (worldPipeline == null || gNormal == null) {
+            return;
+        }
+        worldPipeline.setExtraStorageImage(0, gNormal.view);
+        worldPipeline.setExtraStorageImage(1, gAlbedo.view);
+        worldPipeline.setExtraStorageImage(2, gDepth.view);
+    }
+
+    private void destroyGuideImages() {
+        if (gNormal != null) {
+            gNormal.destroy();
+            gNormal = null;
+        }
+        if (gAlbedo != null) {
+            gAlbedo.destroy();
+            gAlbedo = null;
+        }
+        if (gDepth != null) {
+            gDepth.destroy();
+            gDepth = null;
+        }
+    }
+
     private void ensureOutput(RtContext ctx, int width, int height) {
         if (output != null && baseCopy != null && output.width == width && output.height == height
                 && baseCopy.width == width && baseCopy.height == height) {
@@ -180,17 +214,23 @@ public final class RtComposite {
         if (output != null) {
             output.destroy();
         }
+        destroyGuideImages();
         // RT traces into an HDR (R16G16B16A16_SFLOAT) target so radiance > 1 survives to the tonemap
         // seam in blend.comp. baseCopy stays R8G8B8A8 to match the vanilla world target it is copied
         // to/from (vkCmdCopyImage requires texel-size-compatible formats).
         output = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
         baseCopy = ctx.createStorageImage(width, height);
+        // Guide buffers match the trace resolution (render-res split arrives in P4.2).
+        gNormal = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
+        gAlbedo = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
+        gDepth = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R32_SFLOAT);
         accumNeedsReset = true; // the recreated HDR target has no valid accumulation history
         if (trianglePipeline != null) {
             trianglePipeline.setStorageImage(output.view);
         }
         if (worldPipeline != null) {
             worldPipeline.setStorageImage(output.view);
+            bindGuideImages();
         }
         blendPipeline.setImages(baseCopy.view, output.view);
     }
@@ -235,6 +275,7 @@ public final class RtComposite {
                 push.putFloat(72, (float) (camZ - terrain.blockZ));
                 push.putLong(80, terrain.tableAddress());
                 push.putInt(88, accumFrame);
+                push.putInt(92, DEBUG_VIEW);
                 active.trace(cmd, width, height, push);
             } else {
                 active.trace(cmd, width, height);
@@ -267,6 +308,7 @@ public final class RtComposite {
             output.destroy();
             output = null;
         }
+        destroyGuideImages();
         if (blendPipeline != null) {
             blendPipeline.destroy();
             blendPipeline = null;

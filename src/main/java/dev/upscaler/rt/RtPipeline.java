@@ -69,9 +69,10 @@ public final class RtPipeline {
     private final int missCount;
     private final int pushConstantSize;
     private final int pushConstantStages;
+    private final int firstExtraBinding;
     private boolean destroyed;
 
-    private RtPipeline(RtContext ctx, long dsl, long pool, long[] sets, long layout, long pipeline, RtBuffer sbt, long stride, int missCount, int pushConstantSize, int pushConstantStages) {
+    private RtPipeline(RtContext ctx, long dsl, long pool, long[] sets, long layout, long pipeline, RtBuffer sbt, long stride, int missCount, int pushConstantSize, int pushConstantStages, int firstExtraBinding) {
         this.ctx = ctx;
         this.descriptorSetLayout = dsl;
         this.descriptorPool = pool;
@@ -84,6 +85,7 @@ public final class RtPipeline {
         this.missCount = missCount;
         this.pushConstantSize = pushConstantSize;
         this.pushConstantStages = pushConstantStages;
+        this.firstExtraBinding = firstExtraBinding;
     }
 
     public static RtPipeline create(RtContext ctx, String rgen, String rmiss, String rchit) {
@@ -95,24 +97,27 @@ public final class RtPipeline {
     }
 
     public static RtPipeline create(RtContext ctx, String rgen, String rmiss, String rchit, int pushConstantSize, boolean withAtlasSampler) {
-        return create(ctx, rgen, new String[]{rmiss}, rchit, null, pushConstantSize, withAtlasSampler);
+        return create(ctx, rgen, new String[]{rmiss}, rchit, pushConstantSize, withAtlasSampler);
     }
 
     public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, int pushConstantSize, boolean withAtlasSampler) {
-        return create(ctx, rgen, rmiss, rchit, null, pushConstantSize, withAtlasSampler);
+        return create(ctx, rgen, rmiss, rchit, null, pushConstantSize, withAtlasSampler, 0);
     }
 
     /**
      * Full form. {@code rahit} (nullable) adds an any-hit shader to the single triangle hit group for
      * alpha-tested cutout geometry — it's an extra pipeline stage but not an extra SBT group, so the
      * record layout is unchanged. When present, the atlas sampler and push constants are also made
-     * visible to the any-hit stage.
+     * visible to the any-hit stage. {@code extraStorageImages} adds that many raygen-visible storage
+     * images at bindings 3.. (the P4 guide buffers: normal/roughness, albedo, depth, motion vectors);
+     * write them with {@link #setExtraStorageImage}.
      */
-    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit, int pushConstantSize, boolean withAtlasSampler) {
+    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit, int pushConstantSize, boolean withAtlasSampler, int extraStorageImages) {
         VkDevice vk = ctx.vk();
         boolean hasAhit = rahit != null;
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            int bindingCount = withAtlasSampler ? 3 : 2;
+            int firstExtraBinding = withAtlasSampler ? 3 : 2;
+            int bindingCount = firstExtraBinding + extraStorageImages;
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(bindingCount, stack);
             binds.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
                     .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
@@ -123,14 +128,20 @@ public final class RtPipeline {
                 binds.get(2).binding(2).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                         .descriptorCount(1).stageFlags(atlasStages);
             }
+            for (int e = 0; e < extraStorageImages; e++) {
+                binds.get(firstExtraBinding + e).binding(firstExtraBinding + e).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                        .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+            }
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout");
             long dsl = p.get(0);
 
-            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(bindingCount, stack);
+            int poolSizeCount = withAtlasSampler ? 3 : 2;
+            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(poolSizeCount, stack);
             poolSizes.get(0).type(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(RING);
-            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(RING);
+            // output image (binding 1) + the extra guide images share the storage-image type.
+            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(RING * (1 + extraStorageImages));
             if (withAtlasSampler) {
                 poolSizes.get(2).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(RING);
             }
@@ -228,7 +239,7 @@ public final class RtPipeline {
             for (int g = 0; g < groupCount; g++) {
                 MemoryUtil.memCopy(MemoryUtil.memAddress(handles) + (long) g * handleSize, sbt.mapped + g * stride, handleSize);
             }
-            return new RtPipeline(ctx, dsl, pool, sets, layout, pipeline, sbt, stride, missCount, pushConstantSize, pcStages);
+            return new RtPipeline(ctx, dsl, pool, sets, layout, pipeline, sbt, stride, missCount, pushConstantSize, pcStages, firstExtraBinding);
         }
     }
 
@@ -256,6 +267,20 @@ public final class RtPipeline {
             VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(RING, stack);
             for (int i = 0; i < RING; i++) {
                 write.get(i).sType$Default().dstSet(descriptorSets[i]).dstBinding(1)
+                        .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(imgInfo);
+            }
+            VK10.vkUpdateDescriptorSets(ctx.vk(), write, null);
+        }
+    }
+
+    /** Write an extra storage image (P4 guide buffer) into binding {@code firstExtraBinding + slot} across every ring slot. */
+    public void setExtraStorageImage(int slot, long imageView) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkDescriptorImageInfo.Buffer imgInfo = VkDescriptorImageInfo.calloc(1, stack);
+            imgInfo.get(0).imageView(imageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+            VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(RING, stack);
+            for (int i = 0; i < RING; i++) {
+                write.get(i).sType$Default().dstSet(descriptorSets[i]).dstBinding(firstExtraBinding + slot)
                         .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(imgInfo);
             }
             VK10.vkUpdateDescriptorSets(ctx.vk(), write, null);

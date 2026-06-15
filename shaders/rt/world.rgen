@@ -27,6 +27,12 @@ layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevelAS;
 // HDR trace target (R16G16B16A16_SFLOAT): we write linear radiance which may exceed 1. The
 // HDR -> LDR tonemap happens later, at the blend.comp seam, not here.
 layout(binding = 1, set = 0, rgba16f) uniform image2D outImage;
+// P4 guide buffers — first-hit (primary-visibility) attributes a denoiser/DLSS-RR consumes. Written
+// every frame regardless of accumulation. gNormal.w carries roughness (1.0, Lambertian). gDepth is
+// the linear primary-ray hit distance for now (converted to the DLSS depth convention in P4.2).
+layout(binding = 3, set = 0, rgba16f) uniform image2D gNormal; // xyz world normal, w roughness
+layout(binding = 4, set = 0, rgba16f) uniform image2D gAlbedo; // rgb diffuse albedo
+layout(binding = 5, set = 0, r32f)    uniform image2D gDepth;  // r linear hit distance (<0 = sky)
 
 layout(push_constant) uniform Push {
     mat4 invViewProj;
@@ -35,7 +41,16 @@ layout(push_constant) uniform Push {
     // Explicit offset 88 leaves the closest-hit/any-hit section-table address at 80 (raygen ignores
     // that field). Drives the temporal running mean below and decorrelates the per-frame RNG.
     layout(offset = 88) uint accumFrame;
+    // Debug guide-buffer view: 0 = normal render, 1 = normals, 2 = albedo, 3 = depth, 4 = roughness.
+    layout(offset = 92) uint debugView;
 } pc;
+
+// First-hit (primary-visibility) guide attributes, captured at bounce 0 of tracePath. The primary ray
+// is deterministic (no AA jitter yet), so every SPP sample's bounce 0 yields identical values.
+vec3 gv_normal;
+vec3 gv_albedo;
+float gv_rough;
+float gv_depth; // linear hit distance; < 0 on a primary-ray sky miss
 
 struct Payload {
     vec3 albedo;    // hit: block albedo (atlas * tint). miss: sky radiance.
@@ -106,6 +121,12 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
         traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, 0xFFu, 0u, 0u, 0u, ro, 0.0, rd, 10000.0, 0);
 
         if (payload.hitT < 0.0) {
+            if (bounce == 0) { // primary ray hit sky: guides describe "no surface"
+                gv_normal = vec3(0.0);
+                gv_albedo = payload.albedo;
+                gv_rough = 1.0;
+                gv_depth = -1.0;
+            }
             L += throughput * payload.albedo * SKY_GAIN; // escaped to sky
             break;
         }
@@ -113,6 +134,13 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
         vec3 n = payload.normal;
         vec3 albedo = payload.albedo;
         vec3 p = ro + rd * payload.hitT + n * SURF_BIAS;
+
+        if (bounce == 0) { // primary-visibility surface: capture the denoiser guide buffers
+            gv_normal = n;
+            gv_albedo = albedo;
+            gv_rough = 1.0; // Lambertian for now (PBR roughness arrives in P6)
+            gv_depth = payload.hitT;
+        }
 
         // Emissive surfaces (lava, glowstone, torches, ...) add radiance directly, colored by albedo.
         // Block lights have no NEE yet, so emission is gathered purely by hitting emitters during the
@@ -170,6 +198,27 @@ void main() {
         frameRadiance += min(tracePath(origin, dir, seed), vec3(FIREFLY_MAX));
     }
     frameRadiance /= float(SPP);
+
+    // P4.0a guide buffers: first-hit attributes for the denoiser / DLSS-RR (written every frame).
+    imageStore(gNormal, pix, vec4(gv_normal, gv_rough));
+    imageStore(gAlbedo, pix, vec4(gv_albedo, 1.0));
+    imageStore(gDepth, pix, vec4(gv_depth, 0.0, 0.0, 0.0));
+
+    // Debug guide-buffer visualization: bypass accumulation and show a guide directly.
+    if (pc.debugView != 0u) {
+        vec3 dbg;
+        if (pc.debugView == 1u) {
+            dbg = gv_normal * 0.5 + 0.5;            // world normal -> [0,1]
+        } else if (pc.debugView == 2u) {
+            dbg = gv_albedo;                        // diffuse albedo
+        } else if (pc.debugView == 3u) {
+            dbg = vec3(gv_depth < 0.0 ? 0.0 : gv_depth / 64.0); // linear depth, 64-block normalize
+        } else {
+            dbg = vec3(gv_rough);                   // roughness
+        }
+        imageStore(outImage, pix, vec4(dbg, 1.0));
+        return;
+    }
 
     // Temporal accumulation: incremental running mean in the HDR target. accumFrame == 0 means a fresh
     // viewpoint (camera/geometry just changed), so start over; otherwise blend this frame in at weight
