@@ -164,7 +164,10 @@ public final class RtComposite {
         if (output != null) {
             output.destroy();
         }
-        output = ctx.createStorageImage(width, height);
+        // RT traces into an HDR (R16G16B16A16_SFLOAT) target so radiance > 1 survives to the tonemap
+        // seam in blend.comp. baseCopy stays R8G8B8A8 to match the vanilla world target it is copied
+        // to/from (vkCmdCopyImage requires texel-size-compatible formats).
+        output = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
         baseCopy = ctx.createStorageImage(width, height);
         if (trianglePipeline != null) {
             trianglePipeline.setStorageImage(output.view);

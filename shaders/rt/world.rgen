@@ -16,7 +16,9 @@
 // secondary rays use missIndex 1 (shadow.rmiss) and skip closest-hit, so each is a shallow,
 // depth-1 trace and no recursion budget is needed.
 layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevelAS;
-layout(binding = 1, set = 0, rgba8) uniform image2D outImage;
+// HDR trace target (R16G16B16A16_SFLOAT): we write linear radiance which may exceed 1 (P3). The
+// HDR -> LDR tonemap happens later, at the blend.comp seam, not here.
+layout(binding = 1, set = 0, rgba16f) uniform image2D outImage;
 
 layout(push_constant) uniform Push {
     mat4 invViewProj;
@@ -66,10 +68,14 @@ vec3 cosineDir(vec3 n, inout uint s) {
 
 float visibility(vec3 origin, vec3 dir, float tmax) {
     shadowVis = 0.0; // assume occluded; the shadow miss sets it to 1.0 if the ray escapes
-    // Opaque flag forces all geometry opaque for shadow/AO rays, skipping any-hit — so cutout blocks
-    // (foliage/glass) cast SOLID shadows for now. Cheap; alpha-tested shadows are a later refinement.
+    // No opaque force: cutout geometry (foliage/glass) is built non-opaque, so any-hit (world.rahit)
+    // runs on these visibility rays too and alpha-tests the atlas — transparent texels are ignored and
+    // the ray passes through, opaque texels accept and (with TerminateOnFirstHit) occlude. So leaves
+    // now cast dappled shadows / partial AO instead of solid ones. world.rahit reads no payload, so it
+    // is safe to invoke on the shadowVis ray. Solid blocks keep VK_GEOMETRY_OPAQUE_BIT → any-hit
+    // skipped there. SkipClosestHit keeps each ray a shallow depth-1 trace.
     traceRayEXT(topLevelAS,
-                gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT | gl_RayFlagsOpaqueEXT,
+                gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                 0xFFu, 0u, 0u, 1u, origin, RAY_TMIN, dir, tmax, 1);
     return shadowVis;
 }

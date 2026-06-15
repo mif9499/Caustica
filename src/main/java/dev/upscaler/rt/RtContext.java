@@ -150,14 +150,24 @@ public final class RtContext {
         }
     }
 
-    /** Create an R8G8B8A8 storage image (STORAGE + TRANSFER_SRC/DST) already transitioned to GENERAL. */
+    /** Create an R8G8B8A8_UNORM storage image (STORAGE + TRANSFER_SRC/DST) already transitioned to GENERAL. */
     public RtImage createStorageImage(int width, int height) {
+        return createStorageImage(width, height, VK10.VK_FORMAT_R8G8B8A8_UNORM);
+    }
+
+    /**
+     * Create a storage image of the given format (STORAGE + TRANSFER_SRC/DST), transitioned to GENERAL.
+     * The RT trace target uses an HDR float format (R16G16B16A16_SFLOAT) so radiance values above 1 are
+     * preserved for the tonemap seam; the world-target copy stays R8G8B8A8 to match vanilla's LDR target
+     * for the vkCmdCopyImage round-trip (copy requires texel-size-compatible formats).
+     */
+    public RtImage createStorageImage(int width, int height, int format) {
         long image;
         long allocation;
         long view;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkImageCreateInfo ici = VkImageCreateInfo.calloc(stack).sType$Default()
-                    .imageType(VK10.VK_IMAGE_TYPE_2D).format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+                    .imageType(VK10.VK_IMAGE_TYPE_2D).format(format)
                     .mipLevels(1).arrayLayers(1).samples(VK10.VK_SAMPLE_COUNT_1_BIT).tiling(VK10.VK_IMAGE_TILING_OPTIMAL)
                     .usage(VK10.VK_IMAGE_USAGE_STORAGE_BIT | VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT)
                     .sharingMode(VK10.VK_SHARING_MODE_EXCLUSIVE).initialLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED);
@@ -170,7 +180,7 @@ public final class RtContext {
             allocation = pAlloc.get(0);
 
             VkImageViewCreateInfo vci = VkImageViewCreateInfo.calloc(stack).sType$Default()
-                    .image(image).viewType(VK10.VK_IMAGE_VIEW_TYPE_2D).format(VK10.VK_FORMAT_R8G8B8A8_UNORM);
+                    .image(image).viewType(VK10.VK_IMAGE_VIEW_TYPE_2D).format(format);
             vci.subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
             LongBuffer pView = stack.mallocLong(1);
             check(VK10.vkCreateImageView(vk, vci, null, pView), "vkCreateImageView");

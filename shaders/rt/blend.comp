@@ -2,12 +2,19 @@
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(binding = 0, set = 0, rgba8) uniform image2D baseImage;
-layout(binding = 1, set = 0, rgba8) uniform readonly image2D rtImage;
+layout(binding = 0, set = 0, rgba8) uniform image2D baseImage;        // LDR world target copy
+layout(binding = 1, set = 0, rgba16f) uniform readonly image2D rtImage; // HDR RT radiance
 
 layout(push_constant) uniform Push {
     float blend; // 0 = vanilla only, 1 = RT only
 } pc;
+
+// Tonemap seam: map HDR RT radiance to displayable LDR before compositing over the LDR world target.
+// P3.0 placeholder is a clamp — byte-identical to the old rgba8 trace target, which clamped on store.
+// P3.1 replaces this with a real operator (Reinhard/ACES) once the path tracer emits true HDR values.
+vec3 tonemap(vec3 hdr) {
+    return clamp(hdr, 0.0, 1.0);
+}
 
 void main() {
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
@@ -18,5 +25,6 @@ void main() {
 
     vec4 base = imageLoad(baseImage, pix);
     vec4 rt = imageLoad(rtImage, pix);
-    imageStore(baseImage, pix, mix(base, rt, pc.blend));
+    vec3 ldr = tonemap(rt.rgb);
+    imageStore(baseImage, pix, vec4(mix(base.rgb, ldr, pc.blend), base.a));
 }
