@@ -32,7 +32,7 @@ public final class RtDlssRr {
 
     private static final String SHIM_DLL = "ngxshim.dll";
     private static final String RR_DLL = "nvngx_dlssd.dll";
-    private static final int QUALITY_MAX_QUALITY = 2; // NVSDK_NGX_PerfQuality_Value_MaxQuality
+    private static final int QUALITY_MAX_PERF = 0; // NVSDK_NGX_PerfQuality_Value_MaxPerf
     // DLSS feature flags. IsHDR (bit 0): color is linear HDR (rgba16f) — RR requires it ("HDR Color
     // required"). MVLowRes (bit 1): motion vectors are at render/input resolution, not display — RR
     // requires it ("Low resolution Motion Vectors required"). AutoExposure (bit 6): in HDR mode DLSS
@@ -46,7 +46,7 @@ public final class RtDlssRr {
     // 0 = let the RR DLL pick its per-mode default preset (tuned in P4.3).
     private static final int RENDER_PRESET = Integer.getInteger("upscaler.rt.dlssRr.preset", 0);
 
-    private final int quality = Integer.getInteger("upscaler.rt.dlssRr.quality", QUALITY_MAX_QUALITY);
+    private final int quality = Integer.getInteger("upscaler.rt.dlssRr.quality", QUALITY_MAX_PERF);
 
     private NgxLibrary lib;
     private MemorySegment feature = MemorySegment.NULL;
