@@ -3,6 +3,10 @@ package dev.upscaler.rt;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
+import net.minecraft.client.resources.model.geometry.BakedQuad;
+import org.joml.Matrix4f;
+import org.joml.Vector3f;
+import org.joml.Vector3fc;
 
 /**
  * P5.1b-2 capture infrastructure: a {@link VertexConsumer} that records the posed entity geometry
@@ -35,6 +39,7 @@ public final class RtEntityCapture implements VertexConsumer {
     private final float[] qu = new float[4], qv = new float[4];
     private final float[] qnx = new float[4], qny = new float[4], qnz = new float[4];
     private final int[] qcol = new int[4];
+    private final Vector3f scratch = new Vector3f(); // P5.1b-2d/e baked-quad position transform
 
     /** Clear all accumulators + probe stats for a fresh entity capture. */
     public void reset() {
@@ -74,6 +79,29 @@ public final class RtEntityCapture implements VertexConsumer {
         }
     }
 
+    /**
+     * Capture a {@link BakedQuad} (held/dropped items via {@code submitItem}, falling blocks via {@code
+     * submitBlockModel}) — its 4 positions transformed by {@code pose}, atlas UV from {@code packedUV},
+     * a flat {@code color} tint. These quads carry no authored normal, so emitQuad computes a geometric
+     * one. They sample the block atlas (the capture's {@code currentTexSlot} = 0, the bindless fallback).
+     */
+    public void addBakedQuad(Matrix4f pose, BakedQuad quad, int color) {
+        for (int i = 0; i < 4; i++) {
+            Vector3fc p = quad.position(i);
+            pose.transformPosition(p.x(), p.y(), p.z(), scratch);
+            long uv = quad.packedUV(i);
+            qx[n] = scratch.x; qy[n] = scratch.y; qz[n] = scratch.z;
+            qu[n] = Float.intBitsToFloat((int) (uv >>> 32));
+            qv[n] = Float.intBitsToFloat((int) uv);
+            qnx[n] = 0f; qny[n] = 0f; qnz[n] = 0f; // no authored normal → emitQuad falls back to geometric
+            qcol[n] = color;
+            if (++n == 4) {
+                emitQuad();
+                n = 0;
+            }
+        }
+    }
+
     private void emitQuad() {
         int base = verts.size() / 3;
         for (int i = 0; i < 4; i++) {
@@ -92,9 +120,18 @@ public final class RtEntityCapture implements VertexConsumer {
         idx.add(base + 3);
 
         // Authored model normal (pose-transformed by compile); planar quad, so vertex 0's normal is the
-        // face normal. Normalized defensively. The closest-hit flips it toward the viewer, as for terrain.
+        // face normal. Baked quads (items/blocks) pass no normal → fall back to a geometric one from the
+        // quad edges. The closest-hit flips it toward the viewer, as for terrain.
         float nx = qnx[0], ny = qny[0], nz = qnz[0];
         float len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (len <= 1.0e-6f) {
+            float ex1 = qx[1] - qx[0], ey1 = qy[1] - qy[0], ez1 = qz[1] - qz[0];
+            float ex2 = qx[2] - qx[0], ey2 = qy[2] - qy[0], ez2 = qz[2] - qz[0];
+            nx = ey1 * ez2 - ez1 * ey2;
+            ny = ez1 * ex2 - ex1 * ez2;
+            nz = ex1 * ey2 - ey1 * ex2;
+            len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+        }
         if (len > 1.0e-6f) {
             nx /= len;
             ny /= len;

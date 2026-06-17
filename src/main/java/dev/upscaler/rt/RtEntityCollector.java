@@ -1,12 +1,19 @@
 package dev.upscaler.rt;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.QuadInstance;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.model.Model;
 import net.minecraft.client.renderer.OrderedSubmitNodeCollector;
 import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.block.BlockQuadOutput;
+import net.minecraft.client.renderer.block.ModelBlockRenderer;
 import net.minecraft.client.renderer.block.MovingBlockRenderState;
+import net.minecraft.client.renderer.block.dispatch.BlockStateModel;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
+import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.feature.ModelFeatureRenderer;
 import net.minecraft.client.renderer.gizmos.DrawableGizmoPrimitives;
@@ -15,11 +22,14 @@ import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.QuadParticleRenderState;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.client.resources.model.geometry.BakedQuad;
+import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
+import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 
 import java.util.List;
@@ -37,8 +47,11 @@ import java.util.List;
  * EntityRenderDispatcher.submit} fans out into {@code submitModel} here. Reused across entities.
  */
 public final class RtEntityCollector implements SubmitNodeCollector {
+    private static final Direction[] DIRECTIONS = Direction.values();
+
     private RtEntityCapture capture;
     private RenderType firstRenderType; // P5.1b-2b: the entity's primary (body) render type → texture
+    private ModelBlockRenderer blockRenderer; // P5.1b-2e: lazily-built mesher for moving (falling) blocks
 
     /** Point the collector at the capture buffer for the next {@code dispatcher.submit}. */
     public void begin(RtEntityCapture capture) {
@@ -77,6 +90,30 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         return this; // single un-ordered capture sink — ordering is irrelevant for geometry extraction
     }
 
+    /** Capture a list of baked quads (items / block models), each textured from its sprite's atlas. */
+    private void addQuads(Matrix4f pose, List<BakedQuad> quads, int[] tintLayers) {
+        for (BakedQuad q : quads) {
+            addQuad(pose, q, tintLayers);
+        }
+    }
+
+    /** Capture one baked quad, resolving its atlas (block vs item) to a bindless slot stamped per-prim. */
+    private void addQuad(Matrix4f pose, BakedQuad q, int[] tintLayers) {
+        TextureAtlasSprite sprite = q.materialInfo().sprite();
+        capture.currentTexSlot = sprite != null
+                ? RtEntityTextures.INSTANCE.slotForAtlas(sprite.atlasLocation())
+                : 0;
+        capture.addBakedQuad(pose, q, tintColor(q.materialInfo().tintIndex(), tintLayers));
+    }
+
+    /** Resolve a quad's tint colour from its tint index + the submission's tint layers (white if untinted). */
+    private static int tintColor(int tintIndex, int[] tintLayers) {
+        if (tintIndex < 0 || tintLayers == null || tintIndex >= tintLayers.length) {
+            return -1; // white
+        }
+        return tintLayers[tintIndex] | 0xFF000000; // force opaque; capture uses only the rgb
+    }
+
     // --- Everything below is intentionally a no-op: not entity body geometry. ---
 
     @Override
@@ -101,13 +138,54 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public void submitLeash(PoseStack poseStack, EntityRenderState.LeashState leashState) {
     }
 
+    // P5.1b-2e: falling blocks render here. Mesh the block model (vanilla's mesher, same as terrain)
+    // into the capture; the -0.5,0,-0.5 centring is already baked into poseStack by FallingBlockRenderer,
+    // so the [0,1] block-model quads transform straight by poseStack.last().pose(). Block-atlas textured.
     @Override
-    public void submitMovingBlock(PoseStack poseStack, MovingBlockRenderState movingBlockRenderState, int outlineColor) {
+    public void submitMovingBlock(PoseStack poseStack, MovingBlockRenderState state, int outlineColor) {
+        if (capture == null) {
+            return;
+        }
+        Minecraft mc = Minecraft.getInstance();
+        BlockState bs = state.blockState;
+        BlockStateModel model = mc.getModelManager().getBlockStateModelSet().get(bs);
+        if (model == null) {
+            return;
+        }
+        if (blockRenderer == null) {
+            blockRenderer = new ModelBlockRenderer(false, true, mc.getBlockColors());
+        }
+        final Matrix4f pose = poseStack.last().pose();
+        final int slot = RtEntityTextures.INSTANCE.slotForAtlas(TextureAtlas.LOCATION_BLOCKS);
+        BlockQuadOutput out = new BlockQuadOutput() {
+            @Override
+            public void put(float x, float y, float z, BakedQuad quad, QuadInstance instance) {
+                capture.currentTexSlot = slot;
+                capture.addBakedQuad(pose, quad, -1); // white tint (falling blocks rarely biome-tinted)
+            }
+        };
+        try {
+            blockRenderer.tesselateBlock(out, 0, 0, 0, state, state.blockPos, bs, model, bs.getSeed(state.blockPos));
+        } catch (Throwable t) {
+            // skip a moving block whose meshing throws rather than failing the capture
+        }
     }
 
+    // P5.1b-2e: falling blocks (FallingBlockEntity) render their block model here. Capture every part's
+    // quads (direction-independent + all six cullface lists), block-atlas textured (slot 0).
     @Override
     public void submitBlockModel(PoseStack poseStack, RenderType renderType, List<BlockStateModelPart> parts,
                                  int[] tintLayers, int lightCoords, int overlayCoords, int outlineColor) {
+        if (capture == null) {
+            return;
+        }
+        Matrix4f pose = poseStack.last().pose();
+        for (BlockStateModelPart part : parts) {
+            addQuads(pose, part.getQuads(null), tintLayers);
+            for (Direction d : DIRECTIONS) {
+                addQuads(pose, part.getQuads(d), tintLayers);
+            }
+        }
     }
 
     @Override
@@ -119,10 +197,15 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                                    float width, boolean afterTerrain) {
     }
 
+    // P5.1b-2d: held weapons/tools (via the in-hand layer) + dropped items (ItemEntity) render here as
+    // baked quads on the block atlas. Capture them block-atlas textured (slot 0).
     @Override
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords, int overlayCoords,
-                           int outlineColor, int[] tintLayers, List<net.minecraft.client.resources.model.geometry.BakedQuad> quads,
-                           ItemStackRenderState.FoilType foilType) {
+                           int outlineColor, int[] tintLayers, List<BakedQuad> quads, ItemStackRenderState.FoilType foilType) {
+        if (capture == null) {
+            return;
+        }
+        addQuads(poseStack.last().pose(), quads, tintLayers);
     }
 
     @Override

@@ -4,10 +4,14 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.client.SodiumCompat;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
 import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.resources.Identifier;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +39,9 @@ public final class RtEntityTextures {
     // Append-only RenderType → bindless slot registry (slot 0 = fallback). Slots never change once
     // assigned, so update-after-bind writes for new slots never disturb in-flight frames.
     private final Map<RenderType, Integer> slotCache = new IdentityHashMap<>();
+    // Atlas-location → bindless slot, for items/blocks (which texture from an atlas, not a per-type
+    // file). Seeded with the block atlas = slot 0 (also the fallback). Items use a separate item atlas.
+    private final Map<Identifier, Integer> atlasSlotCache = new HashMap<>();
     private final List<Pending> pending = new ArrayList<>(); // slots resolved this frame, awaiting upload
     private int nextSlot = 1;
     private boolean loggedFailure;
@@ -69,6 +76,39 @@ public final class RtEntityTextures {
         return slot;
     }
 
+    /**
+     * The bindless slot for a texture atlas (block/item atlas used by item + block-model quads), cached
+     * per atlas location. The block atlas is pre-seeded to slot 0; other atlases (the item atlas) get
+     * their own slot. Returns 0 (fallback) if unresolvable or the array is full.
+     */
+    public int slotForAtlas(Identifier atlasLocation) {
+        if (atlasLocation == null) {
+            return 0;
+        }
+        Integer cached = atlasSlotCache.get(atlasLocation);
+        if (cached != null) {
+            return cached;
+        }
+        long view = 0L;
+        try {
+            GpuTextureView v = Minecraft.getInstance().getTextureManager().getTexture(atlasLocation).getTextureView();
+            view = vkImageView(v);
+        } catch (Throwable t) {
+            if (!loggedFailure) {
+                loggedFailure = true;
+                UpscalerMod.LOGGER.warn("RT atlas texture resolution failed for {}", atlasLocation, t);
+            }
+        }
+        if (view == 0L || nextSlot >= MAX_TEXTURES) {
+            atlasSlotCache.put(atlasLocation, 0);
+            return 0;
+        }
+        int slot = nextSlot++;
+        atlasSlotCache.put(atlasLocation, slot);
+        pending.add(new Pending(slot, view));
+        return slot;
+    }
+
     /** Write any newly-registered entity textures into the pipeline's bindless set (before the trace). */
     public void uploadPending(RtPipeline pipeline, long sampler) {
         if (pending.isEmpty()) {
@@ -84,6 +124,8 @@ public final class RtEntityTextures {
     public void reset() {
         viewCache.clear();
         slotCache.clear();
+        atlasSlotCache.clear();
+        atlasSlotCache.put(TextureAtlas.LOCATION_BLOCKS, 0); // block atlas = the slot-0 fallback
         pending.clear();
         nextSlot = 1;
     }
