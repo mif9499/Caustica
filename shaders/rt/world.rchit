@@ -40,7 +40,32 @@ struct Payload {
 layout(location = 0) rayPayloadInEXT Payload payload;
 hitAttributeEXT vec2 attribs;
 
+// P5.1b dynamic entities: instances with this custom-index flag bit are the shared unit-cube BLAS
+// (see RtEntities). Their gl_InstanceCustomIndexEXT does NOT index the section table — they are
+// flat-shaded boxes. The cube's 12 triangles are 2-per-face in this order, so gl_PrimitiveID>>1
+// selects the outward face normal in object space (the instance transform is a positive axis-aligned
+// scale, so axis normals stay axis-aligned and only need the viewer flip below).
+const int ENTITY_BIT = 0x800000;
+const vec3 CUBE_N[6] = vec3[6](
+    vec3(0.0, 0.0, -1.0), vec3(0.0, 0.0, 1.0),  // -Z, +Z
+    vec3(0.0, -1.0, 0.0), vec3(0.0, 1.0, 0.0),  // -Y, +Y
+    vec3(-1.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0)   // -X, +X
+);
+const vec3 ENTITY_ALBEDO = vec3(0.8); // flat neutral until P5.1b-2 brings real model textures
+
 void main() {
+    if ((gl_InstanceCustomIndexEXT & ENTITY_BIT) != 0) {
+        vec3 n = CUBE_N[gl_PrimitiveID >> 1];
+        if (dot(n, gl_WorldRayDirectionEXT) > 0.0) {
+            n = -n; // orient toward the viewer, like the terrain path below
+        }
+        payload.albedo = ENTITY_ALBEDO;
+        payload.normal = n;
+        payload.hitT = gl_HitTEXT;
+        payload.emission = 0.0;
+        return;
+    }
+
     Section sec = SectionTable(pc.tableAddr).s[gl_InstanceCustomIndexEXT];
     uint pid = gl_PrimitiveID;
     Prim pr = Prims(sec.primAddr).p[pid];

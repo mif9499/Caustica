@@ -348,12 +348,15 @@ public final class RtComposite {
             push.putFloat(176, jitterX);
             push.putFloat(180, jitterY);
 
-            // P5.1a: rebuild the TLAS this frame from the static section instances (later merged with
-            // dynamic entity instances), bind it into the pipeline's descriptor ring, record the build
-            // into this frame's command buffer, then barrier so the trace sees the finished TLAS. The
-            // section BLAS are already built (async, by RtTerrain); only the cheap instance-level TLAS
-            // is rebuilt per frame. Retired KEEP_FRAMES later, once this frame is no longer in flight.
-            RtAccel.PreparedTlas frameTlas = RtAccel.prepareTlas(ctx, terrain.staticInstances());
+            // P5.1a/b: rebuild the TLAS this frame from the static section instances merged with
+            // dynamic entity-box instances, bind it into the pipeline's descriptor ring, record the
+            // build into this frame's command buffer, then barrier so the trace sees the finished TLAS.
+            // The section BLAS are already built (async, by RtTerrain) and the entity cube BLAS is built
+            // once; only the cheap instance-level TLAS is rebuilt per frame. Retired KEEP_FRAMES later,
+            // once this frame is no longer in flight.
+            var instances = RtEntities.INSTANCE.withEntities(ctx, terrain.staticInstances(),
+                    terrain.blockX, terrain.blockY, terrain.blockZ);
+            RtAccel.PreparedTlas frameTlas = RtAccel.prepareTlas(ctx, instances);
             active.setTlas(frameTlas.accel.handle);
             RtAccel.recordTlasBuild(cmd, frameTlas);
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace

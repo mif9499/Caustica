@@ -265,7 +265,7 @@ to fill our own buffers — we do not consume its packed/culled render output.)
   refit a per-entity BLAS only on pose change; cheap even with many mobs) + per-frame
   motion vectors (owned, so MV is clean); water/translucency (refraction); foliage
   alpha-test via native **any-hit**.
-  - **P5.1a — dynamic per-frame TLAS plumbing (in working tree; compiles; NOT yet GPU-verified).**
+  - **P5.1a — dynamic per-frame TLAS plumbing (done; commit `9870dc5`; GPU-verified terrain unchanged).**
     The traced TLAS moved out of `RtTerrain` (which still builds the section BLAS async) into a
     **per-frame rebuild recorded inline in the composite's frame command buffer**: `RtTerrain` now
     publishes a static-instance list (`staticInstances()`) + the section table; `RtComposite` each
@@ -274,6 +274,18 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     grew to 6 (per-frame rebind cycles a slot every frame; must exceed frames-in-flight). De-risking
     milestone: **terrain image unchanged, no leaks/corruption flying around** — the foundation entities
     (P5.1b) and per-object MVs (P5.1c) build on.
+  - **P5.1b-1 — entity bounding-box instances (in working tree; compiles + shaders validate; NOT yet
+    GPU-verified).** Dynamic entities enter the trace as **flat-shaded AABB boxes**: a single unit-cube
+    BLAS (`RtEntities`, built once) is instanced per entity into the per-frame TLAS with a scale+translate
+    transform from the entity's interpolated hitbox (rebase-relative, so no per-frame BLAS builds — only
+    the cheap per-frame TLAS P5.1a already rebuilds). `RtAccel.Instance` gained an explicit `customIndex`;
+    entity instances set the `ENTITY_BIT` (0x800000) flag so `world.rchit` flat-shades a box (face normal
+    from `gl_PrimitiveID>>1`) instead of reading the section table. Boxes are opaque (cast + receive
+    shadows/GI). Gated by `-Dupscaler.rt.entities`. **Coarse but real**: lit, shadow-casting dynamic
+    objects. Deferred to **P5.1b-2**: real `ModelPart` model capture (actual mob shapes + entity textures
+    via a capturing `SubmitNodeCollector` — `ModelPart.Cube.compile` emits the same bulk `addVertex` the
+    fluid path already taps). Until **P5.1c** (per-object MVs) moving entities ghost under DLSS-RR (they
+    reuse the camera-reprojection MV, wrong for objects that move relative to the world).
 - **P6 — PBR materials.** LabPBR resource-pack ingestion (normal/roughness/metallic/
   emissive/SSS) + proper BRDF. Heuristic fallback when no PBR pack.
 - **P7 — Perf & polish.** AS compaction, SER tuning, texture-LOD via ray cones,

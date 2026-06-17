@@ -373,11 +373,11 @@ public final class RtTerrain {
             MemoryUtil.memPutLong(base, g.material.deviceAddress);
             MemoryUtil.memPutLong(base + 8, g.indices.deviceAddress);
             MemoryUtil.memPutLong(base + 16, g.uvs.deviceAddress);
-            // instanceCustomIndex == table index i (prepareTlas assigns it from the list order). The
-            // BLAS device address is valid now even though its contents finish building async — the
-            // instance list is only published (and thus traced) once the build completes.
+            // instanceCustomIndex == section-table index i (< ENTITY_BIT, so the hit shader takes the
+            // terrain path). The BLAS device address is valid now even though its contents finish
+            // building async — the instance list is only published (and traced) once the build completes.
             float[] xform = {1, 0, 0, g.sx - rbx, 0, 1, 0, g.sy - rby, 0, 0, 1, g.sz - rbz};
-            instances.add(new RtAccel.Instance(xform, g.blas.deviceAddress));
+            instances.add(new RtAccel.Instance(xform, g.blas.deviceAddress, i));
         }
 
         List<RtAccel.PreparedBlas> blasBuilds = new ArrayList<>(prepared.size());

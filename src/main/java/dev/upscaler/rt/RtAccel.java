@@ -135,8 +135,12 @@ public final class RtAccel {
         return geom;
     }
 
-    /** A TLAS instance: a 3x4 row-major transform and the device address of its BLAS. */
-    public record Instance(float[] transform3x4, long blasDeviceAddress) {
+    /**
+     * A TLAS instance: a 3x4 row-major transform, the device address of its BLAS, and the 24-bit
+     * {@code instanceCustomIndex} the hit shaders read. Terrain passes its section-table index;
+     * dynamic entities set the high {@code ENTITY_BIT} flag so the hit shader takes the entity path.
+     */
+    public record Instance(float[] transform3x4, long blasDeviceAddress, int customIndex) {
     }
 
     /** A TLAS whose AS + backing + instance buffer are allocated but whose build is recorded later. */
@@ -181,7 +185,7 @@ public final class RtAccel {
                 xform.clear();
                 xform.put(inst.transform3x4()).flip();
                 rec.transform().matrix(xform);
-                rec.instanceCustomIndex(i).mask(0xFF).instanceShaderBindingTableRecordOffset(0)
+                rec.instanceCustomIndex(inst.customIndex()).mask(0xFF).instanceShaderBindingTableRecordOffset(0)
                         .flags(0x00000001) // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
                         .accelerationStructureReference(inst.blasDeviceAddress());
                 MemoryUtil.memCopy(rec.address(), instanceBuffer.mapped + (long) i * VkAccelerationStructureInstanceKHR.SIZEOF,
