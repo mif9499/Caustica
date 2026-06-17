@@ -17,14 +17,24 @@ struct Section {
     uint64_t idxAddr;
     uint64_t uvAddr;
 };
+// P5.1b-2 entity geometry record: the entity's {prim, index, uv} buffer addresses (same per-prim
+// {normal, tint} + UV layout as a terrain section) plus its per-object world-space displacement since
+// the previous frame (xyz; w padding) for the motion vector. std430 packs disp at offset 32 (48-byte
+// stride; matches RtEntities' table writes).
+struct EntityGeom {
+    uint64_t primAddr;
+    uint64_t idxAddr;
+    uint64_t uvAddr;
+    vec4 disp;
+};
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Prims { Prim p[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Indices { uint i[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer UVs { vec2 uv[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer SectionTable { Section s[]; };
-// P5.1c: per-entity world-space displacement since the previous frame (xyz; w padding), indexed by the
-// entity instance index (the low bits of gl_InstanceCustomIndexEXT). See RtEntities.
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer EntityTable { vec4 disp[]; };
+// P5.1b-2: per-entity geometry records, indexed by the entity instance index (the low bits of
+// gl_InstanceCustomIndexEXT). See RtEntities.
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer EntityTable { EntityGeom e[]; };
 
 layout(binding = 2, set = 0) uniform sampler2D blockAtlas;
 
@@ -45,31 +55,26 @@ struct Payload {
 layout(location = 0) rayPayloadInEXT Payload payload;
 hitAttributeEXT vec2 attribs;
 
-// P5.1b dynamic entities: instances with this custom-index flag bit are the shared unit-cube BLAS
-// (see RtEntities). Their gl_InstanceCustomIndexEXT does NOT index the section table — they are
-// flat-shaded boxes. The cube's 12 triangles are 2-per-face in this order, so gl_PrimitiveID>>1
-// selects the outward face normal in object space (the instance transform is a positive axis-aligned
-// scale, so axis normals stay axis-aligned and only need the viewer flip below).
+// P5.1b-2 dynamic entities: instances with this custom-index flag bit carry real captured ModelPart
+// geometry. Their gl_InstanceCustomIndexEXT (low bits) indexes the entity geometry table, not the
+// section table; shading reads per-prim normal + vertex-colour tint (no atlas — entity textures are
+// P5.1b-2b) and the per-object MV displacement.
 const int ENTITY_BIT = 0x800000;
-const vec3 CUBE_N[6] = vec3[6](
-    vec3(0.0, 0.0, -1.0), vec3(0.0, 0.0, 1.0),  // -Z, +Z
-    vec3(0.0, -1.0, 0.0), vec3(0.0, 1.0, 0.0),  // -Y, +Y
-    vec3(-1.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0)   // -X, +X
-);
-const vec3 ENTITY_ALBEDO = vec3(0.8); // flat neutral until P5.1b-2 brings real model textures
 
 void main() {
     if ((gl_InstanceCustomIndexEXT & ENTITY_BIT) != 0) {
-        vec3 n = CUBE_N[gl_PrimitiveID >> 1];
+        int eidx = gl_InstanceCustomIndexEXT & ~ENTITY_BIT;
+        EntityGeom g = EntityTable(pc.entityTableAddr).e[eidx];
+        Prim pr = Prims(g.primAddr).p[gl_PrimitiveID];
+        vec3 n = normalize(pr.normal.xyz);
         if (dot(n, gl_WorldRayDirectionEXT) > 0.0) {
             n = -n; // orient toward the viewer, like the terrain path below
         }
-        int eidx = gl_InstanceCustomIndexEXT & ~ENTITY_BIT; // entity instance index into the table
-        payload.albedo = ENTITY_ALBEDO;
+        payload.albedo = pr.tint.rgb; // captured vertex colour (white -> grey-lit) until P5.1b-2b textures
         payload.normal = n;
         payload.hitT = gl_HitTEXT;
         payload.emission = 0.0;
-        payload.motionPrev = EntityTable(pc.entityTableAddr).disp[eidx].xyz; // per-object MV
+        payload.motionPrev = g.disp.xyz; // per-object MV (P5.1c)
         return;
     }
 

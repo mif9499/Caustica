@@ -296,14 +296,17 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     models (P5.1b-2) it's the rigid-body approximation (limb motion is unmodeled) — fine for DLSS-RR.
   - **P5.1b-2 — real model capture (staged).** Replaces the AABB boxes with actual `ModelPart` mob
     geometry via a capturing `SubmitNodeCollector` (`submitModel` → `setupAnim` + `renderToBuffer` into
-    an `RtEntityCapture` VertexConsumer; the rest no-op). **Step 1 (in working tree; compiles; NOT
-    committed; no GPU geometry yet):** the capture infra (`RtEntityCapture`, `RtEntityCollector`) + a
-    gated/throttled verification probe (`RtEntities.probe`, `-Dupscaler.rt.entityProbe`) that extracts +
-    submits each entity and logs captured vert/tri counts + bounds — de-risking the dispatcher/collector
-    integration before the GPU rework. **Step 2:** per-frame per-entity BLAS (recordFrame surgery) + an
-    entity geometry table so the chit reads real per-triangle normals (replacing the box face-normal
-    path). **P5.1b-2b:** entity textures (per-type files → bindless/texture-array; flat vertex-colour
-    until then).
+    an `RtEntityCapture` VertexConsumer; the rest no-op). **Step 1 (done; commit `a4342e8`; GPU-verified
+    via the probe — 107/112 entities captured, 0 failed, sane meshes):** the capture infra
+    (`RtEntityCapture`, `RtEntityCollector`) + a gated/throttled verification probe (`RtEntities.probe`,
+    `-Dupscaler.rt.entityProbe`). **Step 2 (in working tree; compiles + shaders validate; NOT yet
+    GPU-verified):** replaces the AABB boxes with the real captured meshes — per model entity a per-frame
+    BLAS built inline in the composite cmd buffer (entity BLAS → barrier → TLAS → trace), an entity
+    geometry table `{primAddr, idxAddr, uvAddr, disp}` (48-byte ring) so `world.rchit` reads real
+    per-triangle normals + vertex-colour tint + the per-object MV (the CUBE_N box path is removed);
+    captured rebase-relative → identity instance transform. Per-frame BLAS/buffer churn is heavy (cap
+    `-Dupscaler.rt.maxEntities`; pooling/refit deferred). **P5.1b-2b:** entity textures (per-type files →
+    bindless/texture-array; captured UVs stored; flat vertex-colour until then).
 - **P6 — PBR materials.** LabPBR resource-pack ingestion (normal/roughness/metallic/
   emissive/SSS) + proper BRDF. Heuristic fallback when no PBR pack.
 - **P7 — Perf & polish.** AS compaction, SER tuning, texture-LOD via ray cones,

@@ -356,12 +356,20 @@ public final class RtComposite {
             // once this frame is no longer in flight.
             // P5.1b-2 step 1: throttled capture-pipeline probe (no-op unless -Dupscaler.rt.entityProbe).
             RtEntities.INSTANCE.probe(camX, camY, camZ, frameProjection, frameViewRotation);
-            var instances = RtEntities.INSTANCE.withEntities(ctx, terrain.staticInstances(),
-                    terrain.blockX, terrain.blockY, terrain.blockZ);
-            // P5.1c: the entity displacement table this frame's entity hits read for per-object MVs
-            // (0 when no entities — never dereferenced since only entity hits read it).
-            push.putLong(184, RtEntities.INSTANCE.entityTableAddress());
-            RtAccel.PreparedTlas frameTlas = RtAccel.prepareTlas(ctx, instances);
+            // P5.1b-2: capture this frame's entities as real meshes; their per-entity BLAS are built
+            // inline below and merged into the per-frame TLAS. geomTableAddr feeds the chit entity path
+            // (per-prim normal/tint) and per-object motion vectors (0 when no model entities present).
+            RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, terrain.staticInstances(),
+                    terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
+            push.putLong(184, fe.geomTableAddr());
+            // Build the entity BLAS this frame, then the TLAS that references them (+ the already-built
+            // terrain BLAS), then the trace — each separated by a barrier. The frame TLAS is retired
+            // KEEP_FRAMES later (entity meshes/BLAS are retired by RtEntities on the same horizon).
+            if (!fe.blas().isEmpty()) {
+                RtAccel.recordBlasBuilds(cmd, fe.blas());
+                VulkanCommandEncoder.memoryBarrier(cmd, stack); // entity BLAS writes visible to the TLAS build
+            }
+            RtAccel.PreparedTlas frameTlas = RtAccel.prepareTlas(ctx, fe.instances());
             active.setTlas(frameTlas.accel.handle);
             RtAccel.recordTlasBuild(cmd, frameTlas);
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
