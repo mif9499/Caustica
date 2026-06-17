@@ -163,8 +163,10 @@ public final class RtPipeline {
             long bindlessLayout = 0L, bindlessPool = 0L, bindlessSet = 0L;
             if (bindlessTextures > 0) {
                 VkDescriptorSetLayoutBinding.Buffer bl = VkDescriptorSetLayoutBinding.calloc(1, stack);
+                // Sampled by the closest-hit (shading) and, for entity cutout, the any-hit (alpha test).
+                int bindlessStages = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | (hasAhit ? VK_SHADER_STAGE_ANY_HIT_BIT_KHR : 0);
                 bl.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                        .descriptorCount(bindlessTextures).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+                        .descriptorCount(bindlessTextures).stageFlags(bindlessStages);
                 VkDescriptorSetLayoutBindingFlagsCreateInfo bf = VkDescriptorSetLayoutBindingFlagsCreateInfo.calloc(stack).sType$Default()
                         .pBindingFlags(stack.ints(VK12.VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK12.VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT));
                 VkDescriptorSetLayoutCreateInfo bdslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default()

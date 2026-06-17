@@ -2,42 +2,78 @@
 #extension GL_EXT_ray_tracing : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
 
-// Any-hit alpha cutout (P2: per-section). gl_InstanceCustomIndexEXT indexes the section table to
-// find this section's index/uv buffers, then it interpolates the atlas UV (same math as the
-// closest-hit) and discards the hit when the texel alpha is below the cutoff, letting the ray pass
-// through the transparent texels of leaves/grass/etc. Accepted hits fall through to the closest-hit.
+// Any-hit alpha cutout. Two paths, mirroring world.rchit:
+//  * terrain (per-section): gl_InstanceCustomIndexEXT indexes the section table → index/uv buffers,
+//    interpolate the atlas UV, discard below the cutoff (leaves/grass/glass see-through).
+//  * entity (ENTITY_BIT): gl_InstanceCustomIndexEXT (low bits) indexes the entity geometry table →
+//    interpolate the entity UV, sample the per-prim bindless entity texture, discard transparent texels
+//    (so entity cutout — hat/jacket overlays, eyes, capes, … — is see-through). Accepted hits fall
+//    through to the closest-hit. Entity geometry is built non-opaque so this runs for it.
+struct Prim {
+    vec4 normal;
+    vec4 tint;
+};
 struct Section {
     uint64_t primAddr;
     uint64_t idxAddr;
     uint64_t uvAddr;
 };
+struct EntityGeom {
+    uint64_t primAddr;
+    uint64_t idxAddr;
+    uint64_t uvAddr;
+    vec4 disp;
+};
 
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Prims { Prim p[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Indices { uint i[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer UVs { vec2 uv[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer SectionTable { Section s[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer EntityTable { EntityGeom e[]; };
 
 layout(binding = 2, set = 0) uniform sampler2D blockAtlas;
+layout(binding = 0, set = 1) uniform sampler2D entityTex[];
 
 layout(push_constant) uniform Push {
     mat4 invViewProj;
     vec3 camOffset;
     uint64_t tableAddr;
+    layout(offset = 184) uint64_t entityTableAddr;
 } pc;
 
 hitAttributeEXT vec2 attribs;
 
-const float ALPHA_CUTOFF = 0.5;
+const float ALPHA_CUTOFF = 0.5;       // terrain (matches the cutout block models)
+const float ENTITY_ALPHA_CUTOFF = 0.1; // entities: only discard near-fully-transparent texels
+const int ENTITY_BIT = 0x800000;
 
 void main() {
-    Section sec = SectionTable(pc.tableAddr).s[gl_InstanceCustomIndexEXT];
     uint pid = gl_PrimitiveID;
+    vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+
+    if ((gl_InstanceCustomIndexEXT & ENTITY_BIT) != 0) {
+        EntityGeom g = EntityTable(pc.entityTableAddr).e[gl_InstanceCustomIndexEXT & ~ENTITY_BIT];
+        Indices indices = Indices(g.idxAddr);
+        UVs uvs = UVs(g.uvAddr);
+        uint i0 = indices.i[3u * pid + 0u];
+        uint i1 = indices.i[3u * pid + 1u];
+        uint i2 = indices.i[3u * pid + 2u];
+        vec2 uv = bary.x * uvs.uv[i0] + bary.y * uvs.uv[i1] + bary.z * uvs.uv[i2];
+        int texSlot = int(Prims(g.primAddr).p[pid].tint.w + 0.5);
+        if (texture(entityTex[nonuniformEXT(texSlot)], uv).a < ENTITY_ALPHA_CUTOFF) {
+            ignoreIntersectionEXT;
+        }
+        return;
+    }
+
+    Section sec = SectionTable(pc.tableAddr).s[gl_InstanceCustomIndexEXT];
     Indices indices = Indices(sec.idxAddr);
     UVs uvs = UVs(sec.uvAddr);
     uint i0 = indices.i[3u * pid + 0u];
     uint i1 = indices.i[3u * pid + 1u];
     uint i2 = indices.i[3u * pid + 2u];
-    vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
     vec2 uv = bary.x * uvs.uv[i0] + bary.y * uvs.uv[i1] + bary.z * uvs.uv[i2];
 
     if (textureLod(blockAtlas, uv, 0.0).a < ALPHA_CUTOFF) {

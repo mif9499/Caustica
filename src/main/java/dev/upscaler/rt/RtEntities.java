@@ -163,7 +163,9 @@ public final class RtEntities {
             MemoryUtil.memFloatBuffer(uvs.mapped, capture.uvList.size()).put(capture.uvList.elements(), 0, capture.uvList.size());
             MemoryUtil.memFloatBuffer(prim.mapped, capture.prim.size()).put(capture.prim.elements(), 0, capture.prim.size());
 
-            RtAccel.PreparedBlas blas = RtAccel.prepareTrianglesBlas(ctx, positions, vertCount, indices, idxCount, true);
+            // Non-opaque so world.rahit alpha-tests the entity texture (cutout: hat/jacket overlays,
+            // eyes, capes, …). Fully-opaque texels (alpha ≥ cutoff) pass straight through to the chit.
+            RtAccel.PreparedBlas blas = RtAccel.prepareTrianglesBlas(ctx, positions, vertCount, indices, idxCount, false);
 
             // Per-object world displacement since last frame (0 for new entities) for the motion vector.
             int id = entity.getId();
@@ -303,9 +305,9 @@ public final class RtEntities {
                     captured++;
                     totalTris += capture.triangleCount();
                     if (logged < 5) {
-                        sample.append(String.format("  %s: %d verts, %d tris, bbox=[%.2f,%.2f,%.2f .. %.2f,%.2f,%.2f]%n",
-                                entity.getType(), capture.vertexCount(), capture.triangleCount(),
-                                capture.minX, capture.minY, capture.minZ, capture.maxX, capture.maxY, capture.maxZ));
+                        long texView = RtEntityTextures.INSTANCE.resolveView(collector.firstRenderType());
+                        sample.append(String.format("  %s: %d verts, %d tris, tex=0x%x%n",
+                                entity.getType(), capture.vertexCount(), capture.triangleCount(), texView));
                         logged++;
                     }
                 }
