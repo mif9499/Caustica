@@ -341,9 +341,20 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     F0(0.02) / low roughness`; camera-underwater is fixed via a `flags` push bit (`@192`, also carrying the
     `-Dupscaler.rt.pbr` toggle). No NGX/Java-NGX change (the `gSpecAlbedo` image + packed-roughness path
     already existed). A/B: `-Dupscaler.rt.pbr=false` reverts to the legacy Lambertian look.
-  - **P6.2 — LabPBR per-texel ingestion (NEXT, deferred).** Build our own `_n`/`_s` parallel atlases from
-    a LabPBR pack (vanilla builds none) and sample roughness/metallic/normal/emissive/SSS per-texel in the
-    hit shader (the `mat.zw` lanes are reserved). Heuristic stays the fallback when no pack is present.
+  - **P6.2 — LabPBR per-texel ingestion.** Build our own `_n`/`_s` parallel atlases from a LabPBR pack
+    (vanilla builds none) and sample roughness/metallic/normal/emissive/SSS per-texel. Heuristic stays
+    the fallback when no pack/sprite data is present.
+    - **P6.2a — terrain `_s` (specular) → per-texel roughness/metalness (DONE in working tree; builds;
+      not yet GPU-verified).** NEW `RtBlockMaterials` builds a parallel `_s` atlas mirroring the block
+      atlas sprite layout (a `NativeImage`→`DynamicTexture`, MC's own upload path — no Vulkan staging),
+      filled **lazily** from the sprites terrain extraction sees (`BakedQuad.materialInfo().sprite()`; no
+      atlas enumeration). `RtTerrain` flags `_s`-backed prims in the free `mat.z` lane; `world.rchit`
+      samples `blockSpecAtlas` (set 0, binding 8) at the same UV as albedo and decodes LabPBR
+      (`roughness=(1-r)²`, green≥230 = metal), else the heuristic. One extra plain sampler — **no
+      bindless**. Gated by `-Dupscaler.rt.pbr`.
+    - **P6.2b (NEXT) — `_n` normal map.** Needs a per-triangle TBN derived in the chit from the 3 vertex
+      positions + UVs (no new buffer). **P6.2c — entity `_n`/`_s`** via the existing bindless array.
+      Deferred refinements: LabPBR dielectric green-channel F0 (0–229), emission alpha, animated `_s`.
 - **P7 — Perf & polish.** AS compaction, SER tuning, texture-LOD via ray cones,
   distant-geometry LOD or hybrid far-field, variable sample counts, settings UI.
   - **Entity-path perf (deferred from P5.1, which prioritized correctness):** (1) pool + **refit**

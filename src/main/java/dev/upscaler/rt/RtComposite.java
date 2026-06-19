@@ -198,7 +198,7 @@ public final class RtComposite {
         if (worldPipeline == null) {
             worldPipeline = RtPipeline.create(ctx, "world.rgen.spv",
                     new String[]{"world.rmiss.spv", "shadow.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
-                    WORLD_PUSH_SIZE, true, GUIDE_COUNT, RtEntityTextures.MAX_TEXTURES);
+                    WORLD_PUSH_SIZE, true, GUIDE_COUNT, RtEntityTextures.MAX_TEXTURES, RtMaterials.ENABLED);
             if (output != null) {
                 worldPipeline.setStorageImage(output.view);
                 bindGuideImages();
@@ -208,6 +208,16 @@ public final class RtComposite {
             // resolved samples something defined rather than an unbound (partially-bound) descriptor.
             RtEntityTextures.INSTANCE.reset();
             worldPipeline.setBindlessTexture(0, blockAtlasView(), atlasSampler(ctx));
+            // P6.2a: LabPBR _s atlas. Bind the (initially block-atlas-sized) parallel atlas once; its
+            // pixels are filled lazily as terrain extraction encounters sprites and refreshed via flush().
+            // Fall back to the block atlas view if the _s atlas didn't initialize, so binding 8 always
+            // holds a valid descriptor — the shader only samples it when a prim is _s-flagged (mat.z),
+            // which can't happen unless the _s atlas exists, so the fallback content is never read.
+            if (RtMaterials.ENABLED) {
+                RtBlockMaterials.INSTANCE.reset();
+                long specView = RtBlockMaterials.INSTANCE.view();
+                worldPipeline.setBlockSpecAtlas(specView != 0L ? specView : blockAtlasView(), atlasSampler(ctx));
+            }
         }
         // The TLAS is no longer bound here — it's rebuilt and bound per frame in recordFrame (P5.1a),
         // since dynamic content (entities, P5.1b) animates the instance set every frame.
@@ -377,6 +387,11 @@ public final class RtComposite {
             push.putLong(184, fe.geomTableAddr());
             // Upload any entity textures registered this frame into the bindless set before the trace.
             RtEntityTextures.INSTANCE.uploadPending(active, atlasSampler(ctx));
+            // P6.2a: re-upload the LabPBR _s atlas if extraction added sprites since the last frame (the
+            // view handle is stable, so no re-bind needed). Before the trace records, like uploadPending.
+            if (RtMaterials.ENABLED) {
+                RtBlockMaterials.INSTANCE.flush();
+            }
             // Build the entity BLAS this frame, then the TLAS that references them (+ the already-built
             // terrain BLAS), then the trace — each separated by a barrier. The frame TLAS is retired
             // KEEP_FRAMES later (entity meshes/BLAS are retired by RtEntities on the same horizon).

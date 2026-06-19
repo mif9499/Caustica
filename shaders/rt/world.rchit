@@ -39,6 +39,9 @@ layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Sec
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer EntityTable { EntityGeom e[]; };
 
 layout(binding = 2, set = 0) uniform sampler2D blockAtlas;
+// P6.2a: parallel LabPBR _s atlas, stitched to mirror the block atlas sprite layout (RtBlockMaterials),
+// so it samples at the SAME uv as blockAtlas. Read only when the prim is flagged (pr.mat.z > 0.5).
+layout(binding = 8, set = 0) uniform sampler2D blockSpecAtlas;
 // P5.1b-2b: bindless entity textures — a runtime-sized array indexed per-prim (tint.w) by the entity
 // hit path. Slot 0 is a fallback. Entities use per-type texture files, so each RenderType gets a slot.
 layout(binding = 0, set = 1) uniform sampler2D entityTex[];
@@ -125,6 +128,14 @@ void main() {
     payload.emission = pr.normal.w; // 0..1 light level, written by extraction into the free slot
     payload.motionPrev = vec3(0.0); // static terrain: camera-only motion vector
     payload.material = pr.tint.w;   // P5.2: 1 = water dielectric, 0 = opaque (set by extraction)
-    payload.roughness = pr.mat.x;   // P6.1
-    payload.metalness = pr.mat.y;
+    // P6.1 heuristic, overridden per-texel by LabPBR _s when present (P6.2a, flagged in mat.z).
+    float rough = pr.mat.x;
+    float metal = pr.mat.y;
+    if (pr.mat.z > 0.5) {
+        vec4 s = textureLod(blockSpecAtlas, uv, 0.0);
+        rough = (1.0 - s.r) * (1.0 - s.r);          // LabPBR: red = perceptual smoothness
+        metal = s.g >= (229.5 / 255.0) ? 1.0 : 0.0; // LabPBR: green >= 230 = metal, else dielectric
+    }
+    payload.roughness = rough;
+    payload.metalness = metal;
 }

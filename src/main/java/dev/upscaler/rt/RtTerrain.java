@@ -16,6 +16,7 @@ import net.minecraft.client.renderer.block.FluidRenderer;
 import net.minecraft.client.renderer.block.ModelBlockRenderer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModel;
+import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.FluidTags;
@@ -625,6 +626,16 @@ public final class RtTerrain {
             // P6.1: heuristic PBR material (roughness, metalness) for the GGX BRDF / DLSS-RR guides.
             float rough = RtMaterials.roughness(state);
             float metal = RtMaterials.metalness(state);
+            // P6.2a: if a LabPBR _s map exists for this quad's sprite, ingest it into the parallel _s
+            // atlas and flag the prim (mat.z = 1) so the shader samples per-texel roughness/metalness;
+            // otherwise mat.z = 0 keeps the heuristic above.
+            float hasS = 0f;
+            if (RtMaterials.ENABLED) {
+                TextureAtlasSprite sprite = quad.materialInfo().sprite();
+                if (sprite != null && RtBlockMaterials.INSTANCE.ensure(sprite)) {
+                    hasS = 1f;
+                }
+            }
 
             FloatArrayList prim = cur.prim;
             for (int t = 0; t < 2; t++) { // one {normal+emission, tint, mat} record per triangle
@@ -638,7 +649,7 @@ public final class RtTerrain {
                 prim.add(0f);
                 prim.add(rough);
                 prim.add(metal);
-                prim.add(0f);
+                prim.add(hasS);
                 prim.add(0f);
             }
         }
