@@ -47,6 +47,13 @@ public final class RtEntities {
     private static final int MAX_ENTITIES = Integer.getInteger("upscaler.rt.maxEntities", 1024);
     // Chunk radius around the player to scan for block entities (chests/signs/…) each frame.
     private static final int BE_VIEW_CHUNKS = Integer.getInteger("upscaler.rt.beViewChunks", 8);
+    // P5-perf #2: block entities keep a cached mesh + BLAS keyed by BlockPos. Each frame the BE is re-meshed
+    // (cheap) and its mesh hashed; the expensive BLAS is rebuilt ONLY when the mesh actually changed — so
+    // static BEs cost no GPU work (the new-chunk stutter was rebuilding all of them every frame) while
+    // animating ones (chest lid, spawner, …) rebuild every frame and stay smooth. New/changed rebuilds are
+    // capped per frame so a burst of newly loaded chunks can't stall (over-budget BEs keep their last
+    // geometry / pop in over later frames, like terrain's SECTIONS_PER_TICK).
+    private static final int BE_BUILDS_PER_FRAME = Integer.getInteger("upscaler.rt.beBuildsPerFrame", 8);
     // Entity geometry table entry: {u64 primAddr, u64 idxAddr, u64 uvAddr, pad8, vec4 disp} = 48 bytes
     // (std430 vec4 forces the struct to 16-align/48-size; disp.xyz = per-object MV world displacement).
     private static final int TABLE_ENTRY_BYTES = 48;
@@ -91,7 +98,29 @@ public final class RtEntities {
     // P5-perf #1 (step 2): persistent per-entity acceleration structures, keyed by entity id, for refit.
     private final Map<Integer, EntityAccel> entityAccels = new HashMap<>();
 
+    // P5-perf #2: persistent per-block-entity geometry, keyed by BlockPos.asLong(). Built once and reused
+    // every frame (the chunk-load stutter was rebuilding all of these every frame).
+    private final Map<Long, BeEntry> beCache = new HashMap<>();
+    // (Re)builds recorded so far this frame, reset each beginFrame; gates new BE builds to BE_BUILDS_PER_FRAME.
+    private int beBuildsThisFrame;
+
     private RtEntities() {
+    }
+
+    /**
+     * Cached block-entity geometry. The mesh is captured in <b>block-local</b> space (identity submit pose),
+     * so it is rebase-independent — only the per-frame TLAS instance transform ({@code blockPos − rebase})
+     * changes, exactly like a terrain section. The BLAS + mesh buffers are pool-owned and persist until the
+     * BE is evicted (out of window / unloaded) or rebuilt (its mesh changed); {@code idx/uv/prim} are read
+     * by the hit shader every frame via the geometry table, so they must stay alive while traced.
+     */
+    private static final class BeEntry {
+        RtAccel accel;
+        RtBuffer backing;                        // pool-owned AS backing
+        RtBuffer positions, indices, uvs, prim;  // pool-owned mesh buffers
+        int bx, by, bz;                          // block position (drives the per-frame instance transform)
+        long meshHash;                           // hash of the captured mesh — rebuild only when it changes
+        long lastSeen;                           // last frame this BE was in the scan window — for eviction
     }
 
     /** One persistent updatable AS in an entity's ring: its backing buffer (pool-owned) + the topology it
@@ -167,6 +196,7 @@ public final class RtEntities {
         captureEntities(ctx, build, mc, level, partial, rbx, rby, rbz);
         captureBlockEntities(ctx, build, mc, level, partial, rbx, rby, rbz);
         evictStaleAccels();
+        evictStaleBes();
 
         if (build.instances == null) {
             return new FrameEntities(base, List.of(), 0L);
@@ -237,10 +267,20 @@ public final class RtEntities {
         prevPositions = curPositions;
     }
 
-    /** Capture block entities (chests, signs, …) — static, so motion-vector displacement is zero. */
+    /**
+     * Capture block entities (chests, signs, …). P5-perf #2: each BE keeps a cached mesh + BLAS keyed by
+     * BlockPos. Every frame the BE is re-meshed (cheap) and its mesh hashed; the expensive BLAS is rebuilt
+     * only when the mesh actually changed — so static BEs cost no GPU work (the new-chunk stutter was
+     * rebuilding all of them every frame) while animating ones (chest lid, spawner, …) rebuild every frame
+     * and stay smooth. New/changed rebuilds are capped at {@link #BE_BUILDS_PER_FRAME} per frame so a burst
+     * of newly loaded chunks can't stall; over-budget BEs keep their last geometry / pop in over later
+     * frames. Captured block-local → placed by a translate-only instance transform; static, so the MV is 0.
+     */
     private void captureBlockEntities(RtContext ctx, FrameBuild build, Minecraft mc, ClientLevel level, float partial, int rbx, int rby, int rbz) {
+        beBuildsThisFrame = 0;
         BlockEntityRenderDispatcher beDispatcher = mc.getBlockEntityRenderDispatcher();
         beDispatcher.prepare(cameraState.pos); // sets the camera for shouldRender / extract
+        long now = RtComposite.frameCounter();
         int pcx = rbx >> 4, pcz = rbz >> 4;
         for (int cx = pcx - BE_VIEW_CHUNKS; cx <= pcx + BE_VIEW_CHUNKS; cx++) {
             for (int cz = pcz - BE_VIEW_CHUNKS; cz <= pcz + BE_VIEW_CHUNKS; cz++) {
@@ -254,48 +294,191 @@ public final class RtEntities {
                     if (build.full()) {
                         return;
                     }
-                    capture.reset();
-                    try {
-                        BlockEntityRenderState state = beDispatcher.tryExtractRenderState(be, partial, null, false);
-                        if (state == null) {
-                            continue; // off-screen-only (beacon/end-gateway), distance-culled, or no renderer
-                        }
-                        BlockPos p = be.getBlockPos();
-                        PoseStack pose = new PoseStack();
-                        pose.translate(p.getX() - rbx, p.getY() - rby, p.getZ() - rbz);
-                        collector.begin(capture);
-                        beDispatcher.submit(state, pose, collector, cameraState);
-                    } catch (Throwable t) {
-                        continue;
-                    } finally {
-                        collector.begin(null);
-                    }
-                    if (capture.isEmpty()) {
-                        continue;
-                    }
-                    appendCapture(ctx, build, 0f, 0f, 0f, -1); // BEs: static, no entity id → pooled BUILD (step 1)
+                    updateBlockEntity(ctx, build, beDispatcher, be, partial, now, rbx, rby, rbz);
                 }
             }
         }
     }
 
+    /** Re-mesh one block entity; rebuild its cached BLAS only if the mesh changed (budgeted); then emit it. */
+    private void updateBlockEntity(RtContext ctx, FrameBuild build, BlockEntityRenderDispatcher beDispatcher,
+                                   BlockEntity be, float partial, long now, int rbx, int rby, int rbz) {
+        capture.reset();
+        try {
+            BlockEntityRenderState state = beDispatcher.tryExtractRenderState(be, partial, null, false);
+            if (state == null) {
+                return; // off-screen-only (beacon/end-gateway), distance-culled, or no renderer
+            }
+            collector.begin(capture);
+            // Identity pose ⇒ block-local mesh; world placement is the per-frame instance transform in emitBe.
+            beDispatcher.submit(state, new PoseStack(), collector, cameraState);
+        } catch (Throwable t) {
+            return;
+        } finally {
+            collector.begin(null);
+        }
+        if (capture.isEmpty()) {
+            return;
+        }
+        long key = be.getBlockPos().asLong();
+        BeEntry entry = beCache.get(key);
+        if (entry != null) {
+            entry.lastSeen = now;
+        }
+        long hash = meshHash();
+        if (entry == null || entry.meshHash != hash) {
+            // Geometry changed (or new BE) → rebuild, but only within this frame's budget. Over budget: keep
+            // showing the previous geometry; a brand-new BE simply pops in over the next frames.
+            if (beBuildsThisFrame >= BE_BUILDS_PER_FRAME) {
+                if (entry != null) {
+                    emitBe(ctx, build, entry, rbx, rby, rbz);
+                }
+                return;
+            }
+            BeEntry rebuilt = buildBe(ctx, build, be, hash);
+            rebuilt.lastSeen = now;
+            if (entry != null) {
+                deferDestroyBe(entry); // retire the superseded geometry off-queue
+            }
+            beCache.put(key, rebuilt);
+            entry = rebuilt;
+        }
+        emitBe(ctx, build, entry, rbx, rby, rbz);
+    }
+
+    /** Upload the already-captured BE mesh to persistent pooled buffers and build its BLAS (block-local). */
+    private BeEntry buildBe(RtContext ctx, FrameBuild build, BlockEntity be, long hash) {
+        beginBuildIfNeeded(ctx, build);
+        int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        int vertCount = capture.verts.size() / 3;
+        int idxCount = capture.idx.size();
+        RtBuffer positions = pool.acquire(ctx, (long) capture.verts.size() * Float.BYTES, asInput, true);
+        RtBuffer indices = pool.acquire(ctx, (long) capture.idx.size() * Integer.BYTES, asInput | storage, true);
+        RtBuffer uvs = pool.acquire(ctx, (long) capture.uvList.size() * Float.BYTES, storage, true);
+        RtBuffer prim = pool.acquire(ctx, (long) capture.prim.size() * Float.BYTES, storage, true);
+        MemoryUtil.memFloatBuffer(positions.mapped, capture.verts.size()).put(capture.verts.elements(), 0, capture.verts.size());
+        MemoryUtil.memIntBuffer(indices.mapped, capture.idx.size()).put(capture.idx.elements(), 0, capture.idx.size());
+        MemoryUtil.memFloatBuffer(uvs.mapped, capture.uvList.size()).put(capture.uvList.elements(), 0, capture.uvList.size());
+        MemoryUtil.memFloatBuffer(prim.mapped, capture.prim.size()).put(capture.prim.elements(), 0, capture.prim.size());
+
+        // Persistent pooled BLAS reused every frame the mesh is unchanged. UpdatableBuild keeps the AS +
+        // backing and exposes the build scratch separately (released at the frames-in-flight horizon). We
+        // never refit it — a changed BE gets a fresh AS and the old one is defer-freed — so no in-place
+        // write can race an in-flight trace.
+        RtAccel.UpdatableBuild ub = RtAccel.prepareUpdatableBlasBuild(ctx, pool, positions, vertCount, indices, idxCount, false);
+        build.blas.add(ub.op());
+        build.refitScratch.add(ub.scratch());
+        beBuildsThisFrame++;
+
+        BeEntry e = new BeEntry();
+        e.accel = ub.accel();
+        e.backing = ub.backing();
+        e.positions = positions;
+        e.indices = indices;
+        e.uvs = uvs;
+        e.prim = prim;
+        BlockPos p = be.getBlockPos();
+        e.bx = p.getX();
+        e.by = p.getY();
+        e.bz = p.getZ();
+        e.meshHash = hash;
+        return e;
+    }
+
+    /** FNV-1a hash of the currently captured mesh (positions + indices + per-prim data) for rebuild detection. */
+    private long meshHash() {
+        long h = 1469598103934665603L;
+        float[] v = capture.verts.elements();
+        int vn = capture.verts.size();
+        for (int i = 0; i < vn; i++) {
+            h = (h ^ (Float.floatToRawIntBits(v[i]) & 0xffffffffL)) * 1099511628211L;
+        }
+        int[] x = capture.idx.elements();
+        int xn = capture.idx.size();
+        for (int i = 0; i < xn; i++) {
+            h = (h ^ (x[i] & 0xffffffffL)) * 1099511628211L;
+        }
+        float[] pr = capture.prim.elements();
+        int pn = capture.prim.size();
+        for (int i = 0; i < pn; i++) {
+            h = (h ^ (Float.floatToRawIntBits(pr[i]) & 0xffffffffL)) * 1099511628211L;
+        }
+        return h;
+    }
+
+    /** Emit a cached block entity into this frame: its geometry-table entry + a TLAS instance (no GPU build). */
+    private void emitBe(RtContext ctx, FrameBuild build, BeEntry e, int rbx, int rby, int rbz) {
+        if (build.full()) {
+            return;
+        }
+        beginBuildIfNeeded(ctx, build);
+        long entry = build.tableBase + (long) build.count * TABLE_ENTRY_BYTES;
+        MemoryUtil.memPutLong(entry, e.prim.deviceAddress);
+        MemoryUtil.memPutLong(entry + 8, e.indices.deviceAddress);
+        MemoryUtil.memPutLong(entry + 16, e.uvs.deviceAddress);
+        MemoryUtil.memPutFloat(entry + 32, 0f); // disp: block entities are static (no per-object MV)
+        MemoryUtil.memPutFloat(entry + 36, 0f);
+        MemoryUtil.memPutFloat(entry + 40, 0f);
+        MemoryUtil.memPutFloat(entry + 44, 0f);
+        // Block-local mesh placed by a translate-only instance transform (blockPos − rebase), like terrain.
+        float[] xform = {1, 0, 0, e.bx - rbx, 0, 1, 0, e.by - rby, 0, 0, 1, e.bz - rbz};
+        build.instances.add(new RtAccel.Instance(xform, e.accel.deviceAddress, ENTITY_BIT | (build.count & 0x7FFFFF)));
+        build.count++;
+    }
+
+    /** Retire a cached block entity's persistent AS + mesh buffers once off all in-flight queues. */
+    private void deferDestroyBe(BeEntry e) {
+        long freeAt = RtComposite.frameCounter() + KEEP_FRAMES;
+        deferred.add(new Deferred(freeAt, () -> {
+            RtAccel.destroyPooledAccel(pool, e.accel, e.backing);
+            pool.release(e.positions);
+            pool.release(e.indices);
+            pool.release(e.uvs);
+            pool.release(e.prim);
+        }));
+    }
+
+    /** Drop cached block entities not seen (in window) within the last KEEP_FRAMES frames — unloaded/out of view. */
+    private void evictStaleBes() {
+        if (beCache.isEmpty()) {
+            return;
+        }
+        long now = RtComposite.frameCounter();
+        java.util.Iterator<Map.Entry<Long, BeEntry>> it = beCache.entrySet().iterator();
+        while (it.hasNext()) {
+            BeEntry e = it.next().getValue();
+            if (now - e.lastSeen < KEEP_FRAMES) {
+                continue;
+            }
+            deferDestroyBe(e);
+            it.remove();
+        }
+    }
+
+    /** Lazily initialise this frame's build (instance list seeded with terrain, fresh free-lists, table ring slot). */
+    private void beginBuildIfNeeded(RtContext ctx, FrameBuild build) {
+        if (build.instances != null) {
+            return;
+        }
+        build.instances = new ArrayList<>(build.base);
+        build.blas = new ArrayList<>();
+        build.pooledBlas = new ArrayList<>();
+        build.refitScratch = new ArrayList<>();
+        build.buffers = new ArrayList<>();
+        ensureResources(ctx);
+        tableSlot = (tableSlot + 1) % TABLE_RING;
+        build.tableBase = tableRing[tableSlot].mapped;
+        build.geomTableAddr = tableRing[tableSlot].deviceAddress;
+    }
+
     /**
      * Upload the current {@link #capture} as a per-object mesh + BLAS, add its instance + geom-table entry.
-     * {@code entityId} ≥ 0 → refit path (persistent updatable AS keyed by id); {@code < 0} (block entities,
-     * or refit disabled) → pooled full BUILD (step 1).
+     * {@code entityId} ≥ 0 → refit path (persistent updatable AS keyed by id); {@code < 0} (refit disabled)
+     * → pooled full BUILD (step 1). Used by the animated-entity pass; block entities use {@link #buildBe}.
      */
     private void appendCapture(RtContext ctx, FrameBuild build, float dispX, float dispY, float dispZ, int entityId) {
-        if (build.instances == null) {
-            build.instances = new ArrayList<>(build.base);
-            build.blas = new ArrayList<>();
-            build.pooledBlas = new ArrayList<>();
-            build.refitScratch = new ArrayList<>();
-            build.buffers = new ArrayList<>();
-            ensureResources(ctx);
-            tableSlot = (tableSlot + 1) % TABLE_RING;
-            build.tableBase = tableRing[tableSlot].mapped;
-            build.geomTableAddr = tableRing[tableSlot].deviceAddress;
-        }
+        beginBuildIfNeeded(ctx, build);
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         int vertCount = capture.verts.size() / 3;
@@ -467,6 +650,14 @@ public final class RtEntities {
             }
         }
         entityAccels.clear();
+        for (BeEntry e : beCache.values()) {
+            RtAccel.destroyPooledAccel(pool, e.accel, e.backing);
+            pool.release(e.positions);
+            pool.release(e.indices);
+            pool.release(e.uvs);
+            pool.release(e.prim);
+        }
+        beCache.clear();
         pool.destroyAll();
         if (tableRing != null) {
             for (RtBuffer b : tableRing) {
