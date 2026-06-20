@@ -20,15 +20,15 @@ $sodiumJar = Get-ChildItem -Path (Join-Path $sodiumRoot "build\mods") -Filter "s
 	Sort-Object LastWriteTime -Descending |
 	Select-Object -First 1
 
-if ($null -eq $sodiumJar) {
-	throw "Could not find Sodium Fabric jar in $sodiumRoot\build\mods"
-}
+# if ($null -eq $sodiumJar) {
+# 	throw "Could not find Sodium Fabric jar in $sodiumRoot\build\mods"
+# }
 
-New-Item -ItemType Directory -Force -Path $modsDir | Out-Null
-Get-ChildItem -Path $modsDir -Filter "sodium-fabric-*.jar" -ErrorAction SilentlyContinue |
-	Remove-Item -Force
-Copy-Item -LiteralPath $sodiumJar.FullName -Destination (Join-Path $modsDir $sodiumJar.Name) -Force
-Write-Host "Copied $($sodiumJar.Name) to $modsDir"
+# New-Item -ItemType Directory -Force -Path $modsDir | Out-Null
+# Get-ChildItem -Path $modsDir -Filter "sodium-fabric-*.jar" -ErrorAction SilentlyContinue |
+# 	Remove-Item -Force
+# Copy-Item -LiteralPath $sodiumJar.FullName -Destination (Join-Path $modsDir $sodiumJar.Name) -Force
+# Write-Host "Copied $($sodiumJar.Name) to $modsDir"
 
 $ngxShim = Join-Path $upscalerRoot "native\ngx_shim\out\Release\ngxshim.dll"
 if (Test-Path -LiteralPath $ngxShim) {
@@ -39,9 +39,9 @@ if (Test-Path -LiteralPath $ngxShim) {
 
 Push-Location $upscalerRoot
 try {
-	$env:JAVA_TOOL_OPTIONS='-Xmx8G -Dupscaler.backend=dlss -Dupscaler.fsrDebugView=true -Dupscaler.renderScale=0.5 -Dupscaler.dlss.preset=13 -Dupscaler.rt.composite=true -Dupscaler.rt.blend=1 -Dupscaler.rt.dlssRr=true'
+	$env:JAVA_TOOL_OPTIONS='-Xmx8G -Dupscaler.renderScale=0.5 -Dupscaler.rt.composite=true -Dupscaler.rt.output=rt -Dupscaler.rt.dlssRr=true -Dupscaler.rt.exposure.key=0.12 -Dupscaler.rt.exposure.maxEv=2.0 -Dupscaler.rt.exposure.minEv=0.0 -Dupscaler.rt.cancelVanillaWorld=true -Dupscaler.rt.asyncTerrain=true -Dupscaler.rt.workerThreads=4 -Dupscaler.rt.sunNoonSouthDeg=30'
 	.\gradlew.bat --stop
-	.\gradlew.bat runClient
+	.\gradlew.bat runClient --args="--renderDebugLabels --graphicsBackend VULKAN"
 } finally {
 	Pop-Location
 }
