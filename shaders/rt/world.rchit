@@ -21,14 +21,17 @@ struct Section {
     uint64_t uvAddr;
 };
 // P5.1b-2 entity geometry record: the entity's {prim, index, uv} buffer addresses (same per-prim
-// {normal, tint} + UV layout as a terrain section) plus its per-object world-space displacement since
-// the previous frame (xyz; w padding) for the motion vector. std430 packs disp at offset 32 (48-byte
-// stride; matches RtEntities' table writes).
+// {normal, tint} + UV layout as a terrain section) plus the address of a per-vertex world-space
+// displacement buffer (cur − prev frame; vec4 per vertex, xyz used) for the motion vector. P5.1c-2:
+// the displacement is now per-vertex (barycentric-interpolated below) so rotating mobs and animating
+// block entities reproject correctly, not just rigid translation. dispAddr == 0 ⇒ no MV (static).
+// std430 packs dispAddr at offset 24 and keeps the 48-byte stride (vec4 pad); matches RtEntities.
 struct EntityGeom {
     uint64_t primAddr;
     uint64_t idxAddr;
     uint64_t uvAddr;
-    vec4 disp;
+    uint64_t dispAddr;
+    vec4 pad;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Prims { Prim p[]; };
@@ -38,6 +41,9 @@ layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Sec
 // P5.1b-2: per-entity geometry records, indexed by the entity instance index (the low bits of
 // gl_InstanceCustomIndexEXT). See RtEntities.
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer EntityTable { EntityGeom e[]; };
+// P5.1c-2: per-vertex world-space displacement (cur − prev frame), parallel to the vertex/UV buffers
+// (vec4 per vertex, xyz used). Barycentric-interpolated at the hit for a per-vertex motion vector.
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Disps { vec4 d[]; };
 
 layout(binding = 2, set = 0) uniform sampler2D blockAtlas;
 // P6.2a/b: parallel LabPBR _s (specular) and _n (normal) atlases, stitched to mirror the block atlas
@@ -144,7 +150,15 @@ void main() {
         payload.normal = n;
         payload.hitT = gl_HitTEXT;
         payload.emission = 0.0;
-        payload.motionPrev = g.disp.xyz; // per-object MV (P5.1c)
+        // P5.1c-2: per-vertex motion vector — interpolate the captured per-vertex displacement with the
+        // same indices/barycentrics used for the UV above. Exact for rigid translation (all verts share
+        // one disp), rotation, and skeletal/lid animation. dispAddr == 0 ⇒ static (camera-only MV).
+        if (g.dispAddr != 0ul) {
+            Disps dd = Disps(g.dispAddr);
+            payload.motionPrev = ebary.x * dd.d[e0].xyz + ebary.y * dd.d[e1].xyz + ebary.z * dd.d[e2].xyz;
+        } else {
+            payload.motionPrev = vec3(0.0);
+        }
         payload.material = 0.0;          // entities are opaque
         payload.roughness = pr.mat.x;    // P6.1
         payload.metalness = pr.mat.y;

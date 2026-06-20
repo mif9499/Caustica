@@ -83,7 +83,7 @@ struct Payload {
     vec3 normal;    // hit: geometric normal, oriented toward the viewer.
     float hitT;     // >= 0 on hit (ray length), < 0 on miss.
     float emission; // hit: block light level 0..1; 0 on miss.
-    vec3 motionPrev; // hit: world displacement since last frame (entity per-object MV); 0 otherwise.
+    vec3 motionPrev; // hit: per-vertex world displacement since last frame (entity/BE MV); 0 otherwise.
     float material; // hit: 0 = opaque diffuse, 1 = water (smooth dielectric); 0 on miss.
     float roughness; // P6.1: perceptual roughness for the GGX BRDF.
     float metalness; // P6.1: 0 = dielectric, 1 = conductor.
@@ -364,7 +364,7 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
             gv_specAlb = pbr ? F0 : vec3(0.0);   // RR specular-albedo demodulation target (was always 0)
             gv_rough = rough;
             gv_hitCamRel = ro + rd * payload.hitT - pc.camOffset; // camera-relative hit position
-            gv_objDisp = payload.motionPrev; // per-object world motion (0 for static terrain)
+            gv_objDisp = payload.motionPrev; // P5.1c-2: per-vertex world motion (0 for static terrain/sky)
         }
 
         // Emissive surfaces (lava, glowstone, torches, ...) add radiance directly, colored by albedo.
@@ -499,9 +499,10 @@ void main() {
     // DLSS expects with MVJittered unset. (Subtracting the unjittered centre leaked the per-frame jitter
     // into the MV as a constant screen-wide offset = pc.jitter.) Matches mcvr's computeCameraMotionVector,
     // which subtracts the jittered pixelCenter. Scaled from NDC into render-pixel space.
-    // P5.1c: for a dynamic entity the surface also moved in world space, so its previous-frame position
-    // is the current point minus the per-object displacement; subtracting gv_objDisp de-cameras the MV
-    // (gv_objDisp is 0 for static terrain/sky, leaving the validated camera-only reprojection).
+    // P5.1c/P5.1c-2: for a dynamic surface the point also moved in world space, so its previous-frame
+    // position is the current point minus the displacement; subtracting gv_objDisp de-cameras the MV.
+    // gv_objDisp is the chit's PER-VERTEX displacement barycentric-interpolated at the hit (exact for
+    // rotation + skeletal/lid animation, not just rigid translation), and 0 for static terrain/sky.
     vec4 prevClip = pc.prevViewProj * vec4(gv_hitCamRel + pc.camDelta - gv_objDisp, 1.0);
     vec2 motion = (prevClip.xy / prevClip.w - jndc) * 0.5 * size;
     imageStore(gMotion, pix, vec4(motion, 0.0, 0.0));

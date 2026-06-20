@@ -54,8 +54,9 @@ public final class RtEntities {
     // capped per frame so a burst of newly loaded chunks can't stall (over-budget BEs keep their last
     // geometry / pop in over later frames, like terrain's SECTIONS_PER_TICK).
     private static final int BE_BUILDS_PER_FRAME = Integer.getInteger("upscaler.rt.beBuildsPerFrame", 8);
-    // Entity geometry table entry: {u64 primAddr, u64 idxAddr, u64 uvAddr, pad8, vec4 disp} = 48 bytes
-    // (std430 vec4 forces the struct to 16-align/48-size; disp.xyz = per-object MV world displacement).
+    // Entity geometry table entry: {u64 primAddr, u64 idxAddr, u64 uvAddr, u64 dispAddr, vec4 pad} = 48
+    // bytes (std430 vec4 forces 16-align/48-size). P5.1c-2: dispAddr points at a per-vertex world-space
+    // displacement buffer (cur − prev frame) for the motion vector; 0 ⇒ static (no MV).
     private static final int TABLE_ENTRY_BYTES = 48;
     // Ring of fixed-size geometry tables: each frame fills the next slot so the GPU read of this frame's
     // trace never races a later frame's host write. > frames-in-flight (mirrors RtPipeline RING).
@@ -88,9 +89,16 @@ public final class RtEntities {
     // alloc/free churning ~6 VMA buffers per entity per frame. See RtBufferPool.
     private final RtBufferPool pool = new RtBufferPool();
 
-    // Previous frame's absolute interpolated positions, keyed by entity id (rebuilt each frame → prunes
-    // entities that left view); drives the per-object motion-vector displacement.
-    private Map<Integer, float[]> prevPositions = new HashMap<>();
+    // P5.1c-2: previous frame's captured (rebase-space) vertex positions + that frame's rebase origin,
+    // keyed by entity id (rebuilt each frame → prunes entities that left view). Diffed against the current
+    // capture to produce a PER-VERTEX world-space displacement (so rotation/animation reproject, not just
+    // rigid translation). Topology must match (same vertex count) to pair vertices index-by-index.
+    private Map<Integer, EntityPrev> prevVerts = new HashMap<>();
+
+    /** Last frame's posed mesh for one entity: rebase-space vertex positions + the rebase origin they were
+     *  captured against (needed to convert the inter-frame delta to world space when the rebase moved). */
+    private record EntityPrev(float[] verts, int rbx, int rby, int rbz) {
+    }
 
     // Per-frame entity GPU resources awaiting a frames-in-flight-safe free.
     private final List<Deferred> deferred = new ArrayList<>();
@@ -121,6 +129,7 @@ public final class RtEntities {
         int bx, by, bz;                          // block position (drives the per-frame instance transform)
         long meshHash;                           // hash of the captured mesh — rebuild only when it changes
         long lastSeen;                           // last frame this BE was in the scan window — for eviction
+        float[] prevVerts;                       // P5.1c-2: block-local verts at this build, for the per-vertex MV diff
     }
 
     /** One persistent updatable AS in an entity's ring: its backing buffer (pool-owned) + the topology it
@@ -231,7 +240,7 @@ public final class RtEntities {
     private void captureEntities(RtContext ctx, FrameBuild build, Minecraft mc, ClientLevel level, float partial, int rbx, int rby, int rbz) {
         EntityRenderDispatcher dispatcher = mc.getEntityRenderDispatcher();
         Entity cameraEntity = mc.getCameraEntity();
-        Map<Integer, float[]> curPositions = new HashMap<>();
+        Map<Integer, EntityPrev> curVerts = new HashMap<>();
         for (Entity entity : level.entitiesForRendering()) {
             if (build.full()) {
                 break;
@@ -257,14 +266,42 @@ public final class RtEntities {
                 continue; // non-model entity (arrow/etc.) — no body geometry captured
             }
             int id = entity.getId();
-            float[] prev = prevPositions.get(id);
-            float dx = prev == null ? 0f : ix - prev[0];
-            float dy = prev == null ? 0f : iy - prev[1];
-            float dz = prev == null ? 0f : iz - prev[2];
-            curPositions.put(id, new float[]{ix, iy, iz});
-            appendCapture(ctx, build, dx, dy, dz, id);
+            // P5.1c-2: per-vertex world-space displacement vs last frame's posed mesh (null when new or the
+            // topology changed → one frame of camera-only MV, like the old per-object path on first sight).
+            float[] disp = vertexDisp(capture.verts, prevVerts.get(id), rbx, rby, rbz);
+            curVerts.put(id, new EntityPrev(
+                    java.util.Arrays.copyOf(capture.verts.elements(), capture.verts.size()), rbx, rby, rbz));
+            appendCapture(ctx, build, disp, id);
         }
-        prevPositions = curPositions;
+        prevVerts = curVerts;
+    }
+
+    /**
+     * Per-vertex world-space displacement (cur − prev frame), in the {@code Disps} buffer layout (vec4 per
+     * vertex, xyz used). Captures are rebase-relative, so the world delta adds the rebase shift
+     * {@code rebaseCur − rebasePrev}. Returns {@code null} when the entity is new or its vertex count
+     * changed (can't pair vertices index-by-index → no MV that frame). Mirrors the refit topology gate.
+     */
+    private static float[] vertexDisp(it.unimi.dsi.fastutil.floats.FloatArrayList cur, EntityPrev prev,
+                                      int rbx, int rby, int rbz) {
+        if (prev == null || prev.verts().length != cur.size()) {
+            return null;
+        }
+        return buildDisp(cur.elements(), cur.size(), prev.verts(),
+                rbx - prev.rbx(), rby - prev.rby(), rbz - prev.rbz());
+    }
+
+    /** Core per-vertex disp builder: {@code (cur − prev) + rebaseShift}, packed vec4/vertex (w = 0). */
+    private static float[] buildDisp(float[] cur, int curSize, float[] prev, float sx, float sy, float sz) {
+        int vc = curSize / 3;
+        float[] d = new float[vc * 4];
+        for (int i = 0; i < vc; i++) {
+            d[i * 4]     = (cur[i * 3]     - prev[i * 3])     + sx;
+            d[i * 4 + 1] = (cur[i * 3 + 1] - prev[i * 3 + 1]) + sy;
+            d[i * 4 + 2] = (cur[i * 3 + 2] - prev[i * 3 + 2]) + sz;
+            d[i * 4 + 3] = 0f;
+        }
+        return d;
     }
 
     /**
@@ -326,14 +363,20 @@ public final class RtEntities {
             entry.lastSeen = now;
         }
         long hash = meshHash();
+        float[] disp = null; // static unless the mesh changed this frame (chest lid / spawner animation)
         if (entry == null || entry.meshHash != hash) {
             // Geometry changed (or new BE) → rebuild, but only within this frame's budget. Over budget: keep
             // showing the previous geometry; a brand-new BE simply pops in over the next frames.
             if (beBuildsThisFrame >= BE_BUILDS_PER_FRAME) {
                 if (entry != null) {
-                    emitBe(ctx, build, entry, rbx, rby, rbz);
+                    emitBe(ctx, build, entry, null, rbx, rby, rbz); // over budget: keep last geometry, no MV
                 }
                 return;
+            }
+            // P5.1c-2: per-vertex MV from the previous build's block-local mesh (same vertex count ⇒
+            // pairable). The BE itself doesn't move, so the world displacement is the pure local delta.
+            if (entry != null && entry.prevVerts != null && entry.prevVerts.length == capture.verts.size()) {
+                disp = buildDisp(capture.verts.elements(), capture.verts.size(), entry.prevVerts, 0f, 0f, 0f);
             }
             BeEntry rebuilt = buildBe(ctx, build, be, hash);
             rebuilt.lastSeen = now;
@@ -343,7 +386,7 @@ public final class RtEntities {
             beCache.put(key, rebuilt);
             entry = rebuilt;
         }
-        emitBe(ctx, build, entry, rbx, rby, rbz);
+        emitBe(ctx, build, entry, disp, rbx, rby, rbz);
     }
 
     /** Upload the already-captured BE mesh to persistent pooled buffers and build its BLAS (block-local). */
@@ -389,6 +432,8 @@ public final class RtEntities {
         e.by = p.getY();
         e.bz = p.getZ();
         e.meshHash = hash;
+        // P5.1c-2: retain this build's block-local verts so the next rebuild can diff against them for the MV.
+        e.prevVerts = java.util.Arrays.copyOf(capture.verts.elements(), capture.verts.size());
         return e;
     }
 
@@ -414,19 +459,16 @@ public final class RtEntities {
     }
 
     /** Emit a cached block entity into this frame: its geometry-table entry + a TLAS instance (no GPU build). */
-    private void emitBe(RtContext ctx, FrameBuild build, BeEntry e, int rbx, int rby, int rbz) {
+    private void emitBe(RtContext ctx, FrameBuild build, BeEntry e, float[] disp, int rbx, int rby, int rbz) {
         if (build.full()) {
             return;
         }
         beginBuildIfNeeded(ctx, build);
-        long entry = build.tableBase + (long) build.count * TABLE_ENTRY_BYTES;
-        MemoryUtil.memPutLong(entry, e.prim.deviceAddress);
-        MemoryUtil.memPutLong(entry + 8, e.indices.deviceAddress);
-        MemoryUtil.memPutLong(entry + 16, e.uvs.deviceAddress);
-        MemoryUtil.memPutFloat(entry + 32, 0f); // disp: block entities are static (no per-object MV)
-        MemoryUtil.memPutFloat(entry + 36, 0f);
-        MemoryUtil.memPutFloat(entry + 40, 0f);
-        MemoryUtil.memPutFloat(entry + 44, 0f);
+        // P5.1c-2: disp is non-null only for a BE whose mesh changed this frame (chest lid / spawner); a
+        // static BE passes null ⇒ dispAddr 0 ⇒ no MV. The disp buffer is a per-frame transient (the geom
+        // table is rewritten every frame), so a BE that stops animating reverts to MV 0 next frame.
+        long dispAddr = uploadDisp(ctx, build, disp, "block entity");
+        writeTableEntry(build, e.prim.deviceAddress, e.indices.deviceAddress, e.uvs.deviceAddress, dispAddr);
         // Block-local mesh placed by a translate-only instance transform (blockPos − rebase), like terrain.
         float[] xform = {1, 0, 0, e.bx - rbx, 0, 1, 0, e.by - rby, 0, 0, 1, e.bz - rbz};
         build.instances.add(new RtAccel.Instance(xform, e.accel.deviceAddress, ENTITY_BIT | (build.count & 0x7FFFFF)));
@@ -483,7 +525,7 @@ public final class RtEntities {
      * {@code entityId} ≥ 0 → refit path (persistent updatable AS keyed by id); {@code < 0} (refit disabled)
      * → pooled full BUILD (step 1). Used by the animated-entity pass; block entities use {@link #buildBe}.
      */
-    private void appendCapture(RtContext ctx, FrameBuild build, float dispX, float dispY, float dispZ, int entityId) {
+    private void appendCapture(RtContext ctx, FrameBuild build, float[] disp, int entityId) {
         beginBuildIfNeeded(ctx, build);
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -517,14 +559,8 @@ public final class RtEntities {
             accel = blas.accel;
         }
 
-        long entry = build.tableBase + (long) build.count * TABLE_ENTRY_BYTES;
-        MemoryUtil.memPutLong(entry, prim.deviceAddress);
-        MemoryUtil.memPutLong(entry + 8, indices.deviceAddress);
-        MemoryUtil.memPutLong(entry + 16, uvs.deviceAddress);
-        MemoryUtil.memPutFloat(entry + 32, dispX);
-        MemoryUtil.memPutFloat(entry + 36, dispY);
-        MemoryUtil.memPutFloat(entry + 40, dispZ);
-        MemoryUtil.memPutFloat(entry + 44, 0f);
+        long dispAddr = uploadDisp(ctx, build, disp, "entity " + entityId);
+        writeTableEntry(build, prim.deviceAddress, indices.deviceAddress, uvs.deviceAddress, dispAddr);
 
         build.instances.add(new RtAccel.Instance(IDENTITY, accel.deviceAddress, ENTITY_BIT | (build.count & 0x7FFFFF)));
         build.buffers.add(positions);
@@ -532,6 +568,27 @@ public final class RtEntities {
         build.buffers.add(uvs);
         build.buffers.add(prim);
         build.count++;
+    }
+
+    /** Upload a per-vertex displacement array to a pooled per-frame buffer; returns its address (0 if null). */
+    private long uploadDisp(RtContext ctx, FrameBuild build, float[] disp, String label) {
+        if (disp == null) {
+            return 0L;
+        }
+        int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        RtBuffer dispBuf = pool.acquire(ctx, (long) disp.length * Float.BYTES, storage, true, label + " disp");
+        MemoryUtil.memFloatBuffer(dispBuf.mapped, disp.length).put(disp, 0, disp.length);
+        build.buffers.add(dispBuf);
+        return dispBuf.deviceAddress;
+    }
+
+    /** Write one entity geometry-table entry at the current build slot: {primAddr, idxAddr, uvAddr, dispAddr}. */
+    private void writeTableEntry(FrameBuild build, long primAddr, long idxAddr, long uvAddr, long dispAddr) {
+        long entry = build.tableBase + (long) build.count * TABLE_ENTRY_BYTES;
+        MemoryUtil.memPutLong(entry, primAddr);
+        MemoryUtil.memPutLong(entry + 8, idxAddr);
+        MemoryUtil.memPutLong(entry + 16, uvAddr);
+        MemoryUtil.memPutLong(entry + 24, dispAddr);
     }
 
     /**
@@ -680,6 +737,6 @@ public final class RtEntities {
             }
             tableRing = null;
         }
-        prevPositions.clear();
+        prevVerts.clear();
     }
 }
