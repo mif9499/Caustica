@@ -71,14 +71,22 @@ vec3 gv_specAlb; // P6.1: specular albedo fed to DLSS-RR for specular demodulati
 float gv_rough;
 float gv_specHitDistance;
 // Linear VIEW-SPACE depth (perpendicular distance from the camera plane), computed in main() from
-// gv_hitCamRel · camForward — this is what DLSS-RR's Depth_Type_Linear wants, not the slant ray
+// gv_depthHitCamRel · camForward — this is what DLSS-RR's Depth_Type_Linear wants, not the slant ray
 // length. Always >= 0; sky resolves to a large far value (no negative sentinel).
 float gv_depth;
-vec3 gv_hitCamRel;  // hit position relative to the current camera (for motion-vector reprojection)
-// P5.1c: world-space displacement of the first-hit surface since the previous frame (0 for static
-// terrain/sky, the entity's per-object motion for a dynamic entity). Subtracted from the MV
-// reprojection so moving entities get correct motion vectors instead of the camera-only reprojection.
-vec3 gv_objDisp;
+vec3 gv_hitCamRel;  // primary-surface hit position relative to the current camera
+vec3 gv_depthHitCamRel; // depth-guide hit position; water can experimentally use refracted content
+vec3 gv_motionHitCamRel; // motion-guide hit position; water can experimentally use refracted content
+bool gv_motionUseRefracted; // true when MV should solve the previous one-interface refraction
+vec3 gv_motionSurfacePos;
+vec3 gv_motionSurfaceNormal;
+bool gv_motionSurfaceInWater;
+bool gv_motionRefractedSky;
+vec3 gv_motionRefractedDir;
+// P5.1c: world-space displacement of the motion-guide surface since the previous frame (0 for static
+// terrain/sky, an entity's per-vertex/object motion for a dynamic hit). Subtracted from the MV
+// reprojection so moving geometry gets correct motion vectors instead of the camera-only reprojection.
+vec3 gv_motionObjDisp;
 
 struct Payload {
     vec3 albedo;    // hit: block albedo (atlas * tint). miss: sky radiance.
@@ -108,14 +116,12 @@ const float FIREFLY_MAX = 8.0;  // clamp per-path radiance to tame sampling spik
 const float SURF_BIAS = 0.005;  // offset secondary-ray origins along the normal (anti-acne)
 const float RAY_TMIN = 0.001;   // tiny tmin: the normal offset already clears the surface
 
-// P5.2 water (smooth dielectric). IOR 1.333; absorption is a per-block Beer–Lambert extinction —
-// red is absorbed fastest, blue slowest, so the transmitted colour shifts toward blue-green with
-// depth (the recognisable deep-water look). Guide albedo/roughness feed DLSS-RR a stable, slightly
-// glossy surface at the primary water hit (RR fine-tuning for specular water is deferred polish).
+// P5.2 water (smooth dielectric). IOR 1.333; absorption is a per-block Beer-Lambert extinction.
+// Keep the extinction mostly neutral and low so water reads as clear glassy volume instead of a
+// strongly blue-green fog. Guide roughness feeds DLSS-RR a stable smooth primary water hit.
 const float WATER_IOR = 1.333;
-const vec3 WATER_ABSORB = vec3(0.42, 0.12, 0.08); // extinction per block (linear units)
-const vec3 WATER_GUIDE_ALBEDO = vec3(0.04, 0.10, 0.16);
-const float WATER_GUIDE_ROUGH = 0.08;
+const vec3 WATER_ABSORB = vec3(0.035); // neutral extinction per block (linear units)
+const float WATER_GUIDE_ROUGH = 0.0;
 // P6.1: clear-water specular reflectance at normal incidence, F0 = ((n-1)/(n+1))^2 for n = 1.333.
 // Fed to DLSS-RR as the water surface's specular albedo so RR resolves stable reflection/refraction
 // instead of treating the surface as noisy diffuse (the source of the 1-spp shimmer).
@@ -327,6 +333,111 @@ float specularHitDistance(vec3 hitPos, vec3 primaryDir) {
     return payload.hitT > 0.0 ? payload.hitT : 0.0;
 }
 
+void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bool inWaterAtSurface,
+                       out vec3 hitCamRel, out vec3 motionPrev, out bool refracted,
+                       out bool skyMiss, out vec3 refractedDirOut) {
+    hitCamRel = surfacePos - pc.camOffset;
+    motionPrev = vec3(0.0);
+    refracted = false;
+    skyMiss = false;
+    refractedDirOut = incidentDir;
+
+    float etaI = inWaterAtSurface ? WATER_IOR : 1.0;
+    float etaT = inWaterAtSurface ? 1.0 : WATER_IOR;
+    vec3 refractedDir = refract(incidentDir, surfaceNormal, etaI / etaT);
+    if (dot(refractedDir, refractedDir) <= 0.0) {
+        return; // total internal reflection: no refracted guide hit exists
+    }
+    refractedDir = normalize(refractedDir);
+    refracted = true;
+    refractedDirOut = refractedDir;
+
+    vec3 ro = surfacePos - surfaceNormal * SURF_BIAS;
+    payload.hitT = -1.0;
+    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, CULL_SECONDARY,
+                0u, 0u, 0u, ro, RAY_TMIN, refractedDir, 10000.0, 0);
+    if (payload.hitT < 0.0) {
+        hitCamRel = (ro + refractedDir * 1.0e6) - pc.camOffset;
+        motionPrev = vec3(0.0);
+        skyMiss = true;
+        return;
+    }
+
+    vec3 hitPos = ro + refractedDir * payload.hitT;
+    hitCamRel = hitPos - pc.camOffset;
+    motionPrev = (payload.material <= 0.5 || payload.material > 1.5) ? payload.motionPrev : vec3(0.0);
+}
+
+vec2 projectPrevNdc(vec3 worldPos) {
+    vec4 clip = pc.prevViewProj * vec4(worldPos - pc.camOffset + pc.camDelta, 1.0);
+    return clip.xy / clip.w;
+}
+
+vec2 previousRefractedNdc(vec3 surfacePos, vec3 surfaceNormal, bool inWaterAtSurface,
+                          vec3 hitWorldPos, vec3 hitMotionPrev) {
+    vec3 prevCam = pc.camOffset - pc.camDelta;
+    vec3 prevHit = hitWorldPos - hitMotionPrev;
+    vec3 n = normalize(surfaceNormal);
+    if (dot(n, prevCam - surfacePos) < 0.0) {
+        n = -n;
+    }
+
+    float camDist = dot(prevCam - surfacePos, n);
+    float hitDist = -dot(prevHit - surfacePos, n);
+    if (camDist <= 1.0e-4 || hitDist <= 1.0e-4) {
+        return projectPrevNdc(prevHit);
+    }
+
+    vec3 camPlane = prevCam - n * camDist;
+    vec3 hitPlane = prevHit + n * hitDist;
+    vec3 lateral = hitPlane - camPlane;
+    float lateralLen = length(lateral);
+    if (lateralLen <= 1.0e-4) {
+        return projectPrevNdc(camPlane);
+    }
+
+    vec3 axis = lateral / lateralLen;
+    float etaI = inWaterAtSurface ? WATER_IOR : 1.0;
+    float etaT = inWaterAtSurface ? 1.0 : WATER_IOR;
+    float lo = 0.0;
+    float hi = lateralLen;
+    for (int i = 0; i < 12; i++) {
+        float x = 0.5 * (lo + hi);
+        float y = lateralLen - x;
+        float f = etaI * x * inversesqrt(camDist * camDist + x * x)
+                - etaT * y * inversesqrt(hitDist * hitDist + y * y);
+        if (f < 0.0) {
+            lo = x;
+        } else {
+            hi = x;
+        }
+    }
+
+    vec3 prevSurfaceHit = camPlane + axis * (0.5 * (lo + hi));
+    return projectPrevNdc(prevSurfaceHit);
+}
+
+vec2 previousRefractedSkyNdc(vec3 surfacePos, vec3 surfaceNormal, bool inWaterAtSurface, vec3 transmittedDir) {
+    vec3 prevCam = pc.camOffset - pc.camDelta;
+    vec3 n = normalize(surfaceNormal);
+    if (dot(n, prevCam - surfacePos) < 0.0) {
+        n = -n;
+    }
+
+    float cosT = max(0.0, -dot(transmittedDir, n));
+    vec3 transmittedTangent = transmittedDir + n * cosT;
+    float etaI = inWaterAtSurface ? WATER_IOR : 1.0;
+    float etaT = inWaterAtSurface ? 1.0 : WATER_IOR;
+    vec3 incidentTangent = (etaT / etaI) * transmittedTangent;
+    float sinI2 = dot(incidentTangent, incidentTangent);
+    if (sinI2 >= 1.0) {
+        return projectPrevNdc(prevCam + transmittedDir * 1.0e6);
+    }
+
+    vec3 prevIncidentDir = normalize(incidentTangent - n * sqrt(max(0.0, 1.0 - sinI2)));
+    return projectPrevNdc(prevCam + prevIncidentDir * 1.0e6);
+}
+
 // One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path.
 vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
     vec3 L = vec3(0.0);
@@ -354,7 +465,11 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
                 gv_specAlb = SKY_SPEC_ALBEDO;
                 gv_rough = 1.0;
                 gv_hitCamRel = rd * 1.0e6; // sky at infinity: only rotation parallax (-> large far depth)
-                gv_objDisp = vec3(0.0);    // sky is static
+                gv_depthHitCamRel = gv_hitCamRel;
+                gv_motionHitCamRel = gv_hitCamRel;
+                gv_motionUseRefracted = false;
+                gv_motionRefractedSky = false;
+                gv_motionObjDisp = vec3(0.0); // sky is static
             }
             L += throughput * sky; // escaped to sky (SKY_GAIN folded into skyRadiance)
             break;
@@ -362,7 +477,7 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
 
         // Beer–Lambert: attenuate along the segment just travelled if it lay inside water. Applied to
         // every hit reached while submerged (the water-exit face or the underwater floor), shifting the
-        // transmitted radiance toward blue-green with depth.
+        // transmitted radiance with depth.
         if (inWater) {
             throughput *= exp(-WATER_ABSORB * payload.hitT);
         }
@@ -380,7 +495,11 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
             gv_specAlb = vec3(0.0);
             gv_rough = 1.0;
             gv_hitCamRel = hitPos - pc.camOffset;
-            gv_objDisp = payload.motionPrev; // per-particle MV (P-particles MV): de-ghost moving particles
+            gv_depthHitCamRel = gv_hitCamRel;
+            gv_motionHitCamRel = gv_hitCamRel;
+            gv_motionUseRefracted = false;
+            gv_motionRefractedSky = false;
+            gv_motionObjDisp = payload.motionPrev; // per-particle MV (P-particles MV): de-ghost moving particles
             L += throughput * payload.albedo;
             break;
         }
@@ -399,10 +518,15 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
                 // dielectric Fresnel orientation as the path instead of a fixed air-side F0 approximation.
                 gv_normal = n;
                 gv_albedo = vec3(0.0);
-                gv_rough = max(MIN_ROUGH, payload.roughness);
+                gv_rough = WATER_GUIDE_ROUGH;
                 gv_specAlb = rrWaterSpecularAlbedo(cosI, gv_rough, inWater);
                 gv_hitCamRel = hitPos - pc.camOffset;
-                gv_objDisp = vec3(0.0); // water surface is static (no per-object MV)
+                refractedGuideHit(hitPos, rd, n, inWater, gv_depthHitCamRel, gv_motionObjDisp,
+                        gv_motionUseRefracted, gv_motionRefractedSky, gv_motionRefractedDir);
+                gv_motionHitCamRel = gv_depthHitCamRel;
+                gv_motionSurfacePos = hitPos;
+                gv_motionSurfaceNormal = n;
+                gv_motionSurfaceInWater = inWater;
             }
             float etaI = inWater ? WATER_IOR : 1.0;
             float etaT = inWater ? 1.0 : WATER_IOR;
@@ -443,7 +567,11 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
             gv_rough = rough;
             gv_specAlb = pbr ? rrSpecularAlbedo(F0, rough * rough, dot(n, v)) : vec3(0.0);
             gv_hitCamRel = ro + rd * payload.hitT - pc.camOffset; // camera-relative hit position
-            gv_objDisp = payload.motionPrev; // P5.1c-2: per-vertex world motion (0 for static terrain/sky)
+            gv_depthHitCamRel = gv_hitCamRel;
+            gv_motionHitCamRel = gv_hitCamRel;
+            gv_motionUseRefracted = false;
+            gv_motionRefractedSky = false;
+            gv_motionObjDisp = payload.motionPrev; // P5.1c-2: per-vertex world motion (0 for static terrain/sky)
         }
 
         // Emissive surfaces (lava, glowstone, torches, ...) add radiance directly, colored by albedo.
@@ -563,8 +691,10 @@ void main() {
 
     // Linear view-space depth for DLSS-RR (P4.3): perpendicular distance from the camera plane to the
     // first hit = camera-relative hit projected onto the view direction. Non-inverted (near 0, far
-    // large), so DLSS feature flag DepthInverted stays unset. Sky's far gv_hitCamRel -> large depth.
-    gv_depth = dot(gv_hitCamRel, camForward);
+    // large), so DLSS feature flag DepthInverted stays unset. Sky's far gv_depthHitCamRel -> large depth.
+    // Experimental water mode: material guides still describe the primary water surface, but depth can
+    // point at the first deterministic refracted continuation hit behind that surface.
+    gv_depth = dot(gv_depthHitCamRel, camForward);
 
     // P4.0a guide buffers: first-hit attributes for the denoiser / DLSS-RR (written every frame).
     imageStore(gNormal, pix, vec4(gv_normal, gv_rough));
@@ -574,18 +704,34 @@ void main() {
     gv_specHitDistance = specularHitDistance(gv_hitCamRel + pc.camOffset, dir);
     imageStore(gSpecHitDistance, pix, vec4(gv_specHitDistance, 0.0, 0.0, 0.0));
 
-    // P4.0b motion vector: reproject this surface point through the previous frame's view-projection.
+    // P4.0b motion vector: reproject this guide point through the previous frame's view-projection.
     // The primary ray was cast through the JITTERED ndc (jndc), so this hit's current screen position is
     // jndc, NOT the pixel centre. Subtract jndc so the MV is jitter-free (= 0 when static), which is what
     // DLSS expects with MVJittered unset. (Subtracting the unjittered centre leaked the per-frame jitter
     // into the MV as a constant screen-wide offset = pc.jitter.) Matches mcvr's computeCameraMotionVector,
     // which subtracts the jittered pixelCenter. Scaled from NDC into render-pixel space.
     // P5.1c/P5.1c-2: for a dynamic surface the point also moved in world space, so its previous-frame
-    // position is the current point minus the displacement; subtracting gv_objDisp de-cameras the MV.
-    // gv_objDisp is the chit's PER-VERTEX displacement barycentric-interpolated at the hit (exact for
-    // rotation + skeletal/lid animation, not just rigid translation), and 0 for static terrain/sky.
-    vec4 prevClip = pc.prevViewProj * vec4(gv_hitCamRel + pc.camDelta - gv_objDisp, 1.0);
-    vec2 motion = (prevClip.xy / prevClip.w - jndc) * 0.5 * size;
+    // position is the current point minus the displacement; subtracting gv_motionObjDisp de-cameras the MV.
+    // gv_motionObjDisp is the chit's PER-VERTEX displacement barycentric-interpolated at the hit (exact
+    // for rotation + skeletal/lid animation, not just rigid translation), and 0 for static terrain/sky.
+    // Experimental water mode: the MV guide follows the same one-refraction hit as depth, while
+    // specular-hit distance still starts at gv_hitCamRel, the primary water surface. For water, solve
+    // the previous screen position by applying Snell's law at the same static local interface, so the MV
+    // describes the refracted image motion instead of either the water surface or direct receiver motion.
+    vec2 prevNdc;
+    if (gv_motionUseRefracted) {
+        if (gv_motionRefractedSky) {
+            prevNdc = previousRefractedSkyNdc(gv_motionSurfacePos, gv_motionSurfaceNormal,
+                    gv_motionSurfaceInWater, gv_motionRefractedDir);
+        } else {
+            prevNdc = previousRefractedNdc(gv_motionSurfacePos, gv_motionSurfaceNormal, gv_motionSurfaceInWater,
+                    gv_motionHitCamRel + pc.camOffset, gv_motionObjDisp);
+        }
+    } else {
+        vec4 prevClip = pc.prevViewProj * vec4(gv_motionHitCamRel + pc.camDelta - gv_motionObjDisp, 1.0);
+        prevNdc = prevClip.xy / prevClip.w;
+    }
+    vec2 motion = (prevNdc - jndc) * 0.5 * size;
     imageStore(gMotion, pix, vec4(motion, 0.0, 0.0));
 
     // Debug guide-buffer visualization: bypass accumulation and show a guide directly.
