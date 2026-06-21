@@ -33,17 +33,6 @@ import net.minecraft.util.ARGB;
 import org.joml.Vector3fc;
 import org.lwjgl.system.MemoryUtil;
 
-import javax.imageio.ImageIO;
-import java.awt.BasicStroke;
-import java.awt.Color;
-import java.awt.Font;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
-import java.awt.geom.Path2D;
-import java.awt.image.BufferedImage;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -51,9 +40,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -101,19 +88,15 @@ public final class RtTerrain {
     private static final int NO_WATER_GEOM = 0xFFFFFFFF;
     // Terrain OMM: 4-state encoding, conservative by construction. Unknown-opaque still invokes the
     // existing any-hit alpha test; fully-opaque microtriangles skip it in traversal.
-    private static final int OMM_SUBDIVISION = Integer.getInteger("upscaler.rt.ommSubdivision", 2);
+    // Level 4 -> a 16x16 micro-grid that aligns 1:1 with MC's 16x16 texel grid, so each
+    // micro-triangle covers (half of) a single texel and classifies cleanly.
+    private static final int OMM_SUBDIVISION = Integer.getInteger("upscaler.rt.ommSubdivision", 4);
     private static final int OMM_FULLY_TRANSPARENT = 0;
     private static final int OMM_FULLY_OPAQUE = 1;
     private static final int OMM_UNKNOWN_OPAQUE = 3;
     private static final int OMM_CLASS_MIXED = -1;
     private static final int OMM_CLASS_UNSAFE = -2;
     private static final int OMM_ALPHA_CUTOFF = 128; // any-hit uses alpha >= 0.5 as visible
-    private static final boolean OMM_DEBUG_IMAGES = Boolean.getBoolean("upscaler.rt.ommDebugImages");
-    private static final int OMM_DEBUG_IMAGE_LIMIT = Integer.getInteger("upscaler.rt.ommDebugImageLimit", 10);
-    private static final int OMM_DEBUG_IMAGE_SIZE = Integer.getInteger("upscaler.rt.ommDebugImageSize", 512);
-    private static final Path OMM_DEBUG_IMAGE_DIR = Path.of(System.getProperty("upscaler.rt.ommDebugImageDir", "omm-debug"));
-    private static final AtomicInteger OMM_DEBUG_IMAGES_WRITTEN = new AtomicInteger();
-    private static final Set<String> OMM_DEBUG_IMAGE_KEYS = ConcurrentHashMap.newKeySet();
     private static final boolean OMM_STATS = Boolean.getBoolean("upscaler.rt.ommStats");
     private static final long OMM_STATS_INTERVAL_NANOS = 5_000_000_000L;
     private static final AtomicLong OMM_STATS_SECTIONS = new AtomicLong();
@@ -664,7 +647,6 @@ public final class RtTerrain {
                 nullSpriteMicroTriangles += microCount;
                 continue;
             }
-            maybeWriteOmmDebugImage(sprite, level, indices, uvs, t);
             if (sprite.transparency().isOpaque()) {
                 for (int m = 0; m < microCount; m++) {
                     writeOmmValue(data, t, bytesPerTriangle, m, OMM_FULLY_OPAQUE);
@@ -779,257 +761,48 @@ public final class RtTerrain {
         float u2 = uvs[uv2], v2 = uvs[uv2 + 1];
         int grid = 1 << level;
         float invGrid = 1.0f / grid;
-        int opaque = 0;
-        int transparent = 0;
-        int mixed = 0;
-        int unsafe = 0;
+        // counts[0..3] = opaque, transparent, mixed, unsafe
+        int[] counts = new int[4];
         for (int i = 0; i < grid; i++) {
             for (int j = 0; i + j < grid; j++) {
-                float b0 = i * invGrid;
-                float c0 = j * invGrid;
-                float b1 = (i + 1) * invGrid;
-                float c1 = j * invGrid;
-                float b2 = i * invGrid;
-                float c2 = (j + 1) * invGrid;
-                int state = microTriangleOmmState(sprite, u0, v0, u1, v1, u2, v2, b0, c0, b1, c1, b2, c2);
-                if (state == OMM_FULLY_OPAQUE || state == OMM_FULLY_TRANSPARENT) {
-                    writeClassifiedOmmValue(data, tri, bytesPerTriangle, level,
-                            (i + 1.0f / 3.0f) * invGrid, (j + 1.0f / 3.0f) * invGrid, state);
-                    if (state == OMM_FULLY_OPAQUE) {
-                        opaque++;
-                    } else {
-                        transparent++;
-                    }
-                } else if (state == OMM_CLASS_MIXED) {
-                    mixed++;
-                } else {
-                    unsafe++;
-                }
+                // Upright micro-triangle: corners (i,j) (i+1,j) (i,j+1).
+                classifyMicroTriangle(data, tri, bytesPerTriangle, level, sprite, u0, v0, u1, v1, u2, v2,
+                        i, j, i + 1, j, i, j + 1, invGrid,
+                        (i + 1.0f / 3.0f) * invGrid, (j + 1.0f / 3.0f) * invGrid, counts);
+                // Inverted micro-triangle: corners (i+1,j) (i+1,j+1) (i,j+1).
                 if (i + j < grid - 1) {
-                    float b3 = (i + 1) * invGrid;
-                    float c3 = (j + 1) * invGrid;
-                    state = microTriangleOmmState(sprite, u0, v0, u1, v1, u2, v2, b1, c1, b3, c3, b2, c2);
-                    if (state == OMM_FULLY_OPAQUE || state == OMM_FULLY_TRANSPARENT) {
-                        writeClassifiedOmmValue(data, tri, bytesPerTriangle, level,
-                                (i + 2.0f / 3.0f) * invGrid, (j + 2.0f / 3.0f) * invGrid, state);
-                        if (state == OMM_FULLY_OPAQUE) {
-                            opaque++;
-                        } else {
-                            transparent++;
-                        }
-                    } else if (state == OMM_CLASS_MIXED) {
-                        mixed++;
-                    } else {
-                        unsafe++;
-                    }
+                    classifyMicroTriangle(data, tri, bytesPerTriangle, level, sprite, u0, v0, u1, v1, u2, v2,
+                            i + 1, j, i + 1, j + 1, i, j + 1, invGrid,
+                            (i + 2.0f / 3.0f) * invGrid, (j + 2.0f / 3.0f) * invGrid, counts);
                 }
             }
         }
-        return new OmmMicroCounts(opaque, transparent, mixed, unsafe);
+        return new OmmMicroCounts(counts[0], counts[1], counts[2], counts[3]);
     }
 
-    private static void maybeWriteOmmDebugImage(TextureAtlasSprite sprite, int level, int[] indices, float[] uvs, int tri) {
-        if (!OMM_DEBUG_IMAGES || OMM_DEBUG_IMAGE_LIMIT <= 0) {
-            return;
-        }
-        int i0 = indices[tri * 3];
-        int i1 = indices[tri * 3 + 1];
-        int i2 = indices[tri * 3 + 2];
-        int uv0 = i0 * 2;
-        int uv1 = i1 * 2;
-        int uv2 = i2 * 2;
-        float u0 = uvs[uv0], v0 = uvs[uv0 + 1];
-        float u1 = uvs[uv1], v1 = uvs[uv1 + 1];
-        float u2 = uvs[uv2], v2 = uvs[uv2 + 1];
-        String spriteName = sprite.contents().name().toString();
-        String key = spriteName + ":" + level + ":" + Float.floatToIntBits(u0) + ":" + Float.floatToIntBits(v0)
-                + ":" + Float.floatToIntBits(u1) + ":" + Float.floatToIntBits(v1)
-                + ":" + Float.floatToIntBits(u2) + ":" + Float.floatToIntBits(v2);
-        if (!OMM_DEBUG_IMAGE_KEYS.add(key)) {
-            return;
-        }
-        int index = OMM_DEBUG_IMAGES_WRITTEN.getAndIncrement();
-        if (index >= OMM_DEBUG_IMAGE_LIMIT) {
-            OMM_DEBUG_IMAGE_KEYS.remove(key);
-            return;
-        }
-        try {
-            writeOmmDebugImage(index, sprite, spriteName, key, level, u0, v0, u1, v1, u2, v2);
-        } catch (Exception e) {
-            UpscalerMod.LOGGER.warn("RT terrain OMM debug image write failed", e);
-        }
-    }
-
-    private static void writeOmmDebugImage(int index, TextureAtlasSprite sprite, String spriteName, String key, int level,
-                                           float u0, float v0, float u1, float v1, float u2, float v2)
-            throws IOException {
-        var contents = sprite.contents();
-        NativeImage nativeImage = ((SpriteContentsAccessor) contents).upscaler$originalImage();
-        int width = Math.max(1, contents.width());
-        int height = Math.max(1, contents.height());
-        int frameRowSize = Math.max(1, nativeImage.getWidth() / width);
-        var frames = contents.getUniqueFrames();
-        int frame = frames.size() > 0 ? frames.getInt(0) : 0;
-        int frameX = (frame % frameRowSize) * width;
-        int frameY = (frame / frameRowSize) * height;
-
-        BufferedImage base = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        int imgW = nativeImage.getWidth();
-        int imgH = nativeImage.getHeight();
-        for (int y = 0; y < height; y++) {
-            int sy = frameY + y;
-            if (sy < 0 || sy >= imgH) {
-                continue;
+    /**
+     * Classify one micro-triangle (corners given in integer grid coordinates), write its OMM state
+     * when it is uniformly opaque/transparent, and tally the outcome into {@code counts}
+     * (opaque, transparent, mixed, unsafe).
+     */
+    private static void classifyMicroTriangle(byte[] data, int tri, int bytesPerTriangle, int level,
+                                              TextureAtlasSprite sprite, float u0, float v0, float u1, float v1,
+                                              float u2, float v2, int gi0, int gj0, int gi1, int gj1, int gi2, int gj2,
+                                              float invGrid, float centroidB, float centroidC, int[] counts) {
+        int state = microTriangleOmmState(sprite, u0, v0, u1, v1, u2, v2,
+                gi0 * invGrid, gj0 * invGrid, gi1 * invGrid, gj1 * invGrid, gi2 * invGrid, gj2 * invGrid);
+        switch (state) {
+            case OMM_FULLY_OPAQUE -> {
+                writeClassifiedOmmValue(data, tri, bytesPerTriangle, level, centroidB, centroidC, state);
+                counts[0]++;
             }
-            for (int x = 0; x < width; x++) {
-                int sx = frameX + x;
-                if (sx < 0 || sx >= imgW) {
-                    continue;
-                }
-                base.setRGB(x, y, nativeImage.getPixel(sx, sy));
+            case OMM_FULLY_TRANSPARENT -> {
+                writeClassifiedOmmValue(data, tri, bytesPerTriangle, level, centroidB, centroidC, state);
+                counts[1]++;
             }
+            case OMM_CLASS_MIXED -> counts[2]++;
+            default -> counts[3]++;
         }
-
-        int target = Math.max(128, OMM_DEBUG_IMAGE_SIZE);
-        double scale = Math.max(1.0, target / (double) Math.max(width, height));
-        int outW = Math.max(1, (int) Math.ceil(width * scale));
-        int outH = Math.max(1, (int) Math.ceil(height * scale));
-        BufferedImage out = new BufferedImage(outW, outH, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = out.createGraphics();
-        try {
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-            g.drawImage(base, 0, 0, outW, outH, null);
-            g.setStroke(new BasicStroke(Math.max(1.0f, (float) scale * 0.04f)));
-
-            int grid = 1 << level;
-            float invGrid = 1.0f / grid;
-            int opaque = 0;
-            int transparent = 0;
-            int mixed = 0;
-            int unsafe = 0;
-            for (int i = 0; i < grid; i++) {
-                for (int j = 0; i + j < grid; j++) {
-                    int state = drawOmmDebugMicro(g, sprite, outW, outH, u0, v0, u1, v1, u2, v2,
-                            i * invGrid, j * invGrid, (i + 1) * invGrid, j * invGrid,
-                            i * invGrid, (j + 1) * invGrid);
-                    if (state == OMM_FULLY_OPAQUE) {
-                        opaque++;
-                    } else if (state == OMM_FULLY_TRANSPARENT) {
-                        transparent++;
-                    } else if (state == OMM_CLASS_MIXED) {
-                        mixed++;
-                    } else {
-                        unsafe++;
-                    }
-                    if (i + j < grid - 1) {
-                        state = drawOmmDebugMicro(g, sprite, outW, outH, u0, v0, u1, v1, u2, v2,
-                                (i + 1) * invGrid, j * invGrid, (i + 1) * invGrid, (j + 1) * invGrid,
-                                i * invGrid, (j + 1) * invGrid);
-                        if (state == OMM_FULLY_OPAQUE) {
-                            opaque++;
-                        } else if (state == OMM_FULLY_TRANSPARENT) {
-                            transparent++;
-                        } else if (state == OMM_CLASS_MIXED) {
-                            mixed++;
-                        } else {
-                            unsafe++;
-                        }
-                    }
-                }
-            }
-
-            g.setStroke(new BasicStroke(Math.max(2.0f, (float) scale * 0.08f)));
-            g.setColor(Color.WHITE);
-            g.draw(ommDebugPath(sprite, outW, outH, u0, v0, u1, v1, u2, v2, 0f, 0f, 1f, 0f, 0f, 1f));
-            drawOmmDebugLegend(g, outW, outH, spriteName, level, opaque, transparent, mixed, unsafe);
-
-            Files.createDirectories(OMM_DEBUG_IMAGE_DIR);
-            String fileName = String.format(java.util.Locale.ROOT, "%02d_%s_L%d_o%d_t%d_m%d_u%d_%08x.png",
-                    index, sanitizeOmmDebugName(spriteName), level, opaque, transparent, mixed, unsafe, key.hashCode());
-            Path file = OMM_DEBUG_IMAGE_DIR.resolve(fileName);
-            ImageIO.write(out, "png", file.toFile());
-            UpscalerMod.LOGGER.info("RT terrain OMM debug image wrote {}", file.toAbsolutePath());
-        } finally {
-            g.dispose();
-        }
-    }
-
-    private static int drawOmmDebugMicro(Graphics2D g, TextureAtlasSprite sprite, int outW, int outH,
-                                         float u0, float v0, float u1, float v1, float u2, float v2,
-                                         float b0, float c0, float b1, float c1, float b2, float c2) {
-        int state = microTriangleOmmState(sprite, u0, v0, u1, v1, u2, v2, b0, c0, b1, c1, b2, c2);
-        Path2D.Float path = ommDebugPath(sprite, outW, outH, u0, v0, u1, v1, u2, v2, b0, c0, b1, c1, b2, c2);
-        g.setColor(ommDebugFill(state));
-        g.fill(path);
-        g.setColor(ommDebugStroke(state));
-        g.draw(path);
-        return state;
-    }
-
-    private static Path2D.Float ommDebugPath(TextureAtlasSprite sprite, int outW, int outH,
-                                             float u0, float v0, float u1, float v1, float u2, float v2,
-                                             float b0, float c0, float b1, float c1, float b2, float c2) {
-        float tu0 = triangleUv(u0, u1, u2, b0, c0);
-        float tv0 = triangleUv(v0, v1, v2, b0, c0);
-        float tu1 = triangleUv(u0, u1, u2, b1, c1);
-        float tv1 = triangleUv(v0, v1, v2, b1, c1);
-        float tu2 = triangleUv(u0, u1, u2, b2, c2);
-        float tv2 = triangleUv(v0, v1, v2, b2, c2);
-        Path2D.Float path = new Path2D.Float();
-        path.moveTo(ommDebugX(sprite, tu0, outW), ommDebugY(sprite, tv0, outH));
-        path.lineTo(ommDebugX(sprite, tu1, outW), ommDebugY(sprite, tv1, outH));
-        path.lineTo(ommDebugX(sprite, tu2, outW), ommDebugY(sprite, tv2, outH));
-        path.closePath();
-        return path;
-    }
-
-    private static float ommDebugX(TextureAtlasSprite sprite, float u, int outW) {
-        float span = sprite.getU1() - sprite.getU0();
-        return span == 0.0f ? 0.0f : ((u - sprite.getU0()) / span) * outW;
-    }
-
-    private static float ommDebugY(TextureAtlasSprite sprite, float v, int outH) {
-        float span = sprite.getV1() - sprite.getV0();
-        return span == 0.0f ? 0.0f : ((v - sprite.getV0()) / span) * outH;
-    }
-
-    private static Color ommDebugFill(int state) {
-        return switch (state) {
-            case OMM_FULLY_OPAQUE -> new Color(30, 220, 80, 96);
-            case OMM_FULLY_TRANSPARENT -> new Color(40, 160, 255, 96);
-            case OMM_CLASS_MIXED -> new Color(255, 190, 40, 112);
-            default -> new Color(255, 40, 180, 112);
-        };
-    }
-
-    private static Color ommDebugStroke(int state) {
-        return switch (state) {
-            case OMM_FULLY_OPAQUE -> new Color(20, 255, 80, 220);
-            case OMM_FULLY_TRANSPARENT -> new Color(70, 200, 255, 220);
-            case OMM_CLASS_MIXED -> new Color(255, 220, 40, 230);
-            default -> new Color(255, 60, 210, 230);
-        };
-    }
-
-    private static void drawOmmDebugLegend(Graphics2D g, int outW, int outH, String spriteName, int level,
-                                           int opaque, int transparent, int mixed, int unsafe) {
-        g.setFont(new Font(Font.MONOSPACED, Font.BOLD, Math.max(11, outW / 42)));
-        String line1 = "OMM L" + level + " " + spriteName;
-        String line2 = "green opaque=" + opaque + "  blue transparent=" + transparent
-                + "  yellow mixed=" + mixed + "  magenta unsafe=" + unsafe;
-        int pad = Math.max(6, outW / 64);
-        int h = g.getFontMetrics().getHeight();
-        int boxH = h * 2 + pad * 3;
-        g.setColor(new Color(0, 0, 0, 180));
-        g.fillRect(0, Math.max(0, outH - boxH), outW, boxH);
-        g.setColor(Color.WHITE);
-        g.drawString(line1, pad, outH - boxH + pad + h - g.getFontMetrics().getDescent());
-        g.drawString(line2, pad, outH - boxH + pad * 2 + h * 2 - g.getFontMetrics().getDescent());
-    }
-
-    private static String sanitizeOmmDebugName(String name) {
-        String safe = name.replaceAll("[^A-Za-z0-9._-]+", "_");
-        return safe.length() > 80 ? safe.substring(safe.length() - 80) : safe;
     }
 
     private static void writeClassifiedOmmValue(byte[] data, int tri, int bytesPerTriangle, int level,
