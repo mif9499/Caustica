@@ -6,6 +6,7 @@ import dev.upscaler.UpscalerMod;
 import dev.upscaler.mixin.GpuDeviceAccessor;
 import dev.upscaler.ngx.NgxLibrary;
 import net.fabricmc.loader.api.FabricLoader;
+import org.joml.Matrix4fc;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkInstance;
@@ -76,9 +77,10 @@ public final class RtDlssRr {
      * (disabling RR) on failure. MVs are already in render-pixel space (scale 1).
      */
     public boolean evaluate(long cmd, RtImage color, RtImage depth, RtImage motion,
-                            RtImage diffuseAlbedo, RtImage specularAlbedo, RtImage normals, RtImage out,
+                            RtImage diffuseAlbedo, RtImage specularAlbedo, RtImage normals,
+                            RtImage specularHitDistance, RtImage out,
                             int renderWidth, int renderHeight, int displayWidth, int displayHeight,
-                            float jitterX, float jitterY) {
+                            float jitterX, float jitterY, Matrix4fc worldToView, Matrix4fc viewToClip) {
         if (!isReady()) {
             return false;
         }
@@ -88,17 +90,26 @@ public final class RtDlssRr {
                     : Math.clamp((now - lastFrameNanos) / 1_000_000.0f, 0.1f, 200.0f);
             lastFrameNanos = now;
 
-            int rc = lib.evaluateDlssd(cmd, feature,
-                    color.view, color.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    depth.view, depth.image, VK10.VK_FORMAT_R32_SFLOAT,
-                    motion.view, motion.image, VK10.VK_FORMAT_R16G16_SFLOAT,
-                    diffuseAlbedo.view, diffuseAlbedo.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    specularAlbedo.view, specularAlbedo.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    normals.view, normals.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    out.view, out.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    renderWidth, renderHeight, displayWidth, displayHeight,
-                    // jitter in render pixels (P4.2b); MVs are already in render-pixel units, so MV scale = 1.
-                    jitterX, jitterY, 1.0f, 1.0f, resetHistory ? 1 : 0, frameMs);
+            int rc;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment worldToViewMatrix = arena.allocate(ValueLayout.JAVA_FLOAT, 16);
+                MemorySegment viewToClipMatrix = arena.allocate(ValueLayout.JAVA_FLOAT, 16);
+                putNgxLeftMultiplyMatrix(worldToView, worldToViewMatrix);
+                putNgxLeftMultiplyMatrix(viewToClip, viewToClipMatrix);
+                rc = lib.evaluateDlssd(cmd, feature,
+                        color.view, color.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                        depth.view, depth.image, VK10.VK_FORMAT_R32_SFLOAT,
+                        motion.view, motion.image, VK10.VK_FORMAT_R16G16_SFLOAT,
+                        diffuseAlbedo.view, diffuseAlbedo.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                        specularAlbedo.view, specularAlbedo.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                        normals.view, normals.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                        specularHitDistance.view, specularHitDistance.image, VK10.VK_FORMAT_R32_SFLOAT,
+                        out.view, out.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                        renderWidth, renderHeight, displayWidth, displayHeight,
+                        // jitter in render pixels (P4.2b); MVs are already in render-pixel units, so MV scale = 1.
+                        jitterX, jitterY, 1.0f, 1.0f, resetHistory ? 1 : 0, frameMs,
+                        worldToViewMatrix, viewToClipMatrix);
+            }
             resetHistory = false;
             if (ngxFailed(rc)) {
                 throw new IllegalStateException("ngxshim_evaluate_dlssd failed: 0x" + Integer.toHexString(rc)
@@ -240,6 +251,28 @@ public final class RtDlssRr {
         seg.set(ValueLayout.JAVA_BYTE, utf16.length, (byte) 0);
         seg.set(ValueLayout.JAVA_BYTE, utf16.length + 1, (byte) 0);
         return seg;
+    }
+
+    private static void putNgxLeftMultiplyMatrix(Matrix4fc m, MemorySegment dst) {
+        // NGX wants row-major matrices used with left-multiplied row vectors. Our JOML/GLSL matrices are
+        // used with column vectors, so the equivalent NGX matrix is the transpose; JOML's normal storage
+        // order is exactly row-major storage of that transpose.
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 0, m.m00());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 1, m.m01());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 2, m.m02());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 3, m.m03());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 4, m.m10());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 5, m.m11());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 6, m.m12());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 7, m.m13());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 8, m.m20());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 9, m.m21());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 10, m.m22());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 11, m.m23());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 12, m.m30());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 13, m.m31());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 14, m.m32());
+        dst.setAtIndex(ValueLayout.JAVA_FLOAT, 15, m.m33());
     }
 
     private static Path locate(String name) {

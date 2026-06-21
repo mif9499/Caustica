@@ -3,9 +3,10 @@ package dev.upscaler.client;
 /**
  * Sub-pixel camera jitter for DLSS Ray Reconstruction.
  *
- * <p>Generates a Halton(2,3) low-discrepancy sequence in render-pixel space, with the phase-count rule
- * {@code ceil(8 * (display/render)^2)}. {@link dev.upscaler.rt.RtComposite} reads the per-frame offset,
- * applies it to the primary ray in the path-tracing shader, and reports it to DLSS-RR's evaluate.
+ * <p>Generates a Halton(2,3) low-discrepancy sequence in render-pixel space, with the DLSS phase-count
+ * rule {@code ceil(8 * (display/render)^2)} and RR's recommended floor of 32 phases.
+ * {@link dev.upscaler.rt.RtComposite} reads the per-frame offset, applies it to the primary ray in the
+ * path-tracing shader, and reports it to DLSS-RR's evaluate.
  */
 public final class UpscalerJitter {
 	public static final UpscalerJitter INSTANCE = new UpscalerJitter();
@@ -36,7 +37,7 @@ public final class UpscalerJitter {
 
 	private static int jitterPhaseCount(int renderWidth, int displayWidth) {
 		float ratio = (float) displayWidth / Math.max(1, renderWidth);
-		return Math.max(1, (int) Math.ceil(8.0f * ratio * ratio));
+		return Math.max(32, (int) Math.ceil(8.0f * ratio * ratio));
 	}
 
 	private static float halton(int index, int base) {

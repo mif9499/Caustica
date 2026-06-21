@@ -115,7 +115,7 @@ public final class RtPipeline {
      * alpha-tested cutout geometry — it's an extra pipeline stage but not an extra SBT group, so the
      * record layout is unchanged. When present, the atlas sampler and push constants are also made
      * visible to the any-hit stage. {@code extraStorageImages} adds that many raygen-visible storage
-     * images at bindings 3.. (the P4 guide buffers: normal/roughness, albedo, depth, motion vectors);
+     * images at bindings 3.. (the P4/RR guide buffers);
      * write them with {@link #setExtraStorageImage}.
      */
     public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit, int pushConstantSize, boolean withAtlasSampler, int extraStorageImages, int bindlessTextures, boolean blockMaterialAtlases) {
@@ -124,9 +124,9 @@ public final class RtPipeline {
         String label = "world RT pipeline";
         try (MemoryStack stack = MemoryStack.stackPush()) {
             int firstExtraBinding = withAtlasSampler ? 3 : 2;
-            // P6.2a/b: the LabPBR _s (binding 8) + _n (binding 9) atlases (combined image samplers) follow
-            // the guide images, so they start at firstExtraBinding + extraStorageImages. Sampled only by
-            // the closest-hit (material readout).
+            // P6.2a/b: the LabPBR _s/_n atlases (combined image samplers) follow the guide images, so
+            // they start at firstExtraBinding + extraStorageImages. Sampled only by the closest-hit
+            // (material readout).
             int materialBase = firstExtraBinding + extraStorageImages;
             int specBinding = blockMaterialAtlases ? materialBase : -1;
             int normalBinding = blockMaterialAtlases ? materialBase + 1 : -1;
@@ -348,7 +348,7 @@ public final class RtPipeline {
         }
     }
 
-    /** Write an extra storage image (P4 guide buffer) into binding {@code firstExtraBinding + slot} across every ring slot. */
+    /** Write an extra storage image (P4/RR guide buffer) into binding {@code firstExtraBinding + slot} across every ring slot. */
     public void setExtraStorageImage(int slot, long imageView) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkDescriptorImageInfo.Buffer imgInfo = VkDescriptorImageInfo.calloc(1, stack);
