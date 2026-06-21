@@ -68,6 +68,13 @@ public final class SodiumCompat {
 				for (String extension : RtDeviceBringup.RT_EXTENSIONS) {
 					requestDeviceExtension.invoke(registry, extension, false);
 				}
+				// Optional RT extensions (e.g. opacity micromaps) — requested non-required so Sodium enables
+				// them only on devices that support them; the feature structs are added in VulkanBackendMixin.
+				if (RtDeviceBringup.ENABLE_OMM) {
+					for (String extension : RtDeviceBringup.OPTIONAL_RT_EXTENSIONS) {
+						requestDeviceExtension.invoke(registry, extension, false);
+					}
+				}
 				RtDeviceBringup.sodiumExtensionsRegistered = true;
 				UpscalerMod.LOGGER.info("Registered ray-tracing device extensions through Sodium");
 			}

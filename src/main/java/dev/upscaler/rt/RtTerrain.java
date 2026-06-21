@@ -3,8 +3,10 @@ package dev.upscaler.rt;
 import com.mojang.blaze3d.vertex.QuadInstance;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import dev.upscaler.UpscalerMod;
+import dev.upscaler.mixin.SpriteContentsAccessor;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
+import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.color.block.BlockColors;
 import net.minecraft.client.color.block.BlockTintSource;
@@ -27,9 +29,21 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.util.ARGB;
 import org.joml.Vector3fc;
 import org.lwjgl.system.MemoryUtil;
 
+import javax.imageio.ImageIO;
+import java.awt.BasicStroke;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.geom.Path2D;
+import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -37,7 +51,10 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * P2 step 3: per-section terrain residency synced to vanilla's loaded chunks. A singleton manager
@@ -82,6 +99,37 @@ public final class RtTerrain {
     private static final int SECTION_ENTRY_BYTES = 40; // {u64 primAddr, u64 idxAddr, u64 uvAddr, u32 triBase[3], u32 waterGeom}
     // Sentinel for "this section has no water geometry": no gl_GeometryIndexEXT (0..2) can equal it.
     private static final int NO_WATER_GEOM = 0xFFFFFFFF;
+    // Terrain OMM: 4-state encoding, conservative by construction. Unknown-opaque still invokes the
+    // existing any-hit alpha test; fully-opaque microtriangles skip it in traversal.
+    private static final int OMM_SUBDIVISION = Integer.getInteger("upscaler.rt.ommSubdivision", 2);
+    private static final int OMM_FULLY_TRANSPARENT = 0;
+    private static final int OMM_FULLY_OPAQUE = 1;
+    private static final int OMM_UNKNOWN_OPAQUE = 3;
+    private static final int OMM_CLASS_MIXED = -1;
+    private static final int OMM_CLASS_UNSAFE = -2;
+    private static final int OMM_ALPHA_CUTOFF = 128; // any-hit uses alpha >= 0.5 as visible
+    private static final boolean OMM_DEBUG_IMAGES = Boolean.getBoolean("upscaler.rt.ommDebugImages");
+    private static final int OMM_DEBUG_IMAGE_LIMIT = Integer.getInteger("upscaler.rt.ommDebugImageLimit", 10);
+    private static final int OMM_DEBUG_IMAGE_SIZE = Integer.getInteger("upscaler.rt.ommDebugImageSize", 512);
+    private static final Path OMM_DEBUG_IMAGE_DIR = Path.of(System.getProperty("upscaler.rt.ommDebugImageDir", "omm-debug"));
+    private static final AtomicInteger OMM_DEBUG_IMAGES_WRITTEN = new AtomicInteger();
+    private static final Set<String> OMM_DEBUG_IMAGE_KEYS = ConcurrentHashMap.newKeySet();
+    private static final boolean OMM_STATS = Boolean.getBoolean("upscaler.rt.ommStats");
+    private static final long OMM_STATS_INTERVAL_NANOS = 5_000_000_000L;
+    private static final AtomicLong OMM_STATS_SECTIONS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_CUTOUT_SECTIONS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_MICROMAP_SECTIONS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_CUTOUT_TRIS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_OPAQUE_MICROS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_TRANSPARENT_MICROS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_MIXED_MICROS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_UNSAFE_MICROS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_NULL_SPRITE_MICROS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_TOTAL_MICROS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_ANIMATED_TRIS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_NULL_SPRITE_TRIS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_DISABLED_SECTIONS = new AtomicLong();
+    private static final AtomicLong OMM_STATS_LAST_LOG = new AtomicLong();
     // Frames a retired resource must outlive before it's freed (> frames-in-flight). The frame counter
     // advances per composite; old TLAS/table/sections are freed this many frames after the swap.
     private static final int KEEP_FRAMES = 4;
@@ -353,11 +401,12 @@ public final class RtTerrain {
                 // Snapshot on the render thread (reads the live level); the resulting region is then
                 // a thread-safe BlockAndTintGetter the tessellation can run against off-thread.
                 RenderSectionRegion region = regionCache.createRegion(level, SectionPos.asLong(s[0], s[1], s[2]));
-                SectionMesh mesh = tessellate(region, modelSet, renderer, capture, fluidRenderer, fluidCapture, m, s[0], s[1], s[2]);
+                CpuSection cpu = buildCpuSection(region, modelSet, renderer, capture, fluidRenderer, fluidCapture, m, s[0], s[1], s[2]);
+                SectionMesh mesh = cpu.mesh();
                 if (mesh.isEmpty()) {
                     empty.add(key);
                 } else {
-                    prepared.add(uploadSection(ctx, mesh, key, s[0] << 4, s[1] << 4, s[2] << 4));
+                    prepared.add(uploadSection(ctx, mesh, cpu.opacityMicromap(), key, s[0] << 4, s[1] << 4, s[2] << 4));
                 }
             }
         }
@@ -410,12 +459,22 @@ public final class RtTerrain {
     }
 
     /**
-     * Tessellate one section to a section-local CPU mesh. <b>Pure CPU + snapshot reads only</b> — no
-     * Vulkan, no shared mutable state — so this is the unit a worker thread runs. LabPBR material
+     * Tessellate one section to a section-local CPU mesh and precompute pure-CPU sidecar data such as
+     * the terrain opacity micromap. <b>Pure CPU + snapshot reads only</b> — no Vulkan, no shared mutable
+     * state — so this is the unit a worker thread runs. LabPBR material
      * ingestion ({@link RtBlockMaterials#ensure}) creates/uploads GPU textures, so it is deferred: each
      * triangle's sprite is recorded into {@link SectionMesh#triSprites} and resolved later on the render
      * thread in {@link #uploadSection}. Returns the mesh (possibly empty — caller checks {@code idx}).
      */
+    private static CpuSection buildCpuSection(RenderSectionRegion region, BlockStateModelSet modelSet,
+                                              ModelBlockRenderer renderer, QuadCapture capture,
+                                              FluidRenderer fluidRenderer, FluidCapture fluidCapture,
+                                              BlockPos.MutableBlockPos m, int scx, int scy, int scz) {
+        SectionMesh mesh = tessellate(region, modelSet, renderer, capture, fluidRenderer, fluidCapture, m, scx, scy, scz);
+        RtAccel.OpacityMicromapInput ommInput = mesh.isEmpty() ? null : buildOpacityMicromapInput(mesh.cutout);
+        return new CpuSection(mesh, ommInput);
+    }
+
     private static SectionMesh tessellate(RenderSectionRegion region, BlockStateModelSet modelSet,
                                           ModelBlockRenderer renderer, QuadCapture capture,
                                           FluidRenderer fluidRenderer, FluidCapture fluidCapture,
@@ -482,9 +541,11 @@ public final class RtTerrain {
     /**
      * Upload a tessellated {@link SectionMesh} to GPU buffers and prepare (not yet build) its BLAS.
      * <b>Render thread only</b> — creates Vulkan buffers and resolves LabPBR materials (which
-     * create/upload GPU textures). {@code mesh} must be non-empty.
+     * create/upload GPU textures). The optional OMM input is precomputed by {@link #buildCpuSection}.
+     * {@code mesh} must be non-empty.
      */
-    private static PreparedSection uploadSection(RtContext ctx, SectionMesh mesh, long key, int sox, int soy, int soz) {
+    private static PreparedSection uploadSection(RtContext ctx, SectionMesh mesh, RtAccel.OpacityMicromapInput ommInput,
+                                                 long key, int sox, int soy, int soz) {
         Geom[] buckets = mesh.buckets(); // { opaque, cutout, water }, indexed by RtAccel.BUCKET_*
         int vertFloats = 0, idxCount = 0, uvFloats = 0, primFloats = 0;
         int[] bucketTris = new int[buckets.length];
@@ -543,7 +604,7 @@ public final class RtTerrain {
 
         // Split BLAS: geom for each non-empty bucket — solid (OPAQUE, any-hit skipped), cutout (alpha test),
         // water (shadow passthrough). Build is deferred — the caller batches all sections into one submission.
-        RtAccel.PreparedBlas blas = RtAccel.prepareTerrainBlas(ctx, positions, vertCount, indices, bucketTris,
+        RtAccel.PreparedBlas blas = RtAccel.prepareTerrainBlas(ctx, positions, vertCount, indices, bucketTris, ommInput,
                 label + " BLAS");
         return new PreparedSection(key, positions, indices, uvs, material, blas, triBase, waterGeom, sox, soy, soz);
     }
@@ -567,6 +628,583 @@ public final class RtTerrain {
             prim.set(off + 10, (flags & RtBlockMaterials.HAS_S) != 0 ? 1f : 0f);
             prim.set(off + 11, (flags & RtBlockMaterials.HAS_N) != 0 ? 1f : 0f);
         }
+    }
+
+    private static RtAccel.OpacityMicromapInput buildOpacityMicromapInput(Geom cutout) {
+        if (!RtDeviceBringup.ommEnabled()) {
+            recordOmmStatsDisabled();
+            return null;
+        }
+        int triCount = cutout.triCount();
+        if (triCount == 0 || cutout.ommSprites.size() != triCount) {
+            recordOmmStats(triCount, 0, 0, 0, 0, 0, 0, 0, 0, 0, false);
+            return null;
+        }
+        int level = opacityMicromapSubdivisionLevel();
+        int microCount = 1 << (level * 2);
+        int bytesPerTriangle = Math.max(1, (microCount * 2 + 7) >>> 3);
+        byte[] data = new byte[triCount * bytesPerTriangle];
+        byte unknownOpaqueByte = (byte) (OMM_UNKNOWN_OPAQUE | (OMM_UNKNOWN_OPAQUE << 2)
+                | (OMM_UNKNOWN_OPAQUE << 4) | (OMM_UNKNOWN_OPAQUE << 6));
+        java.util.Arrays.fill(data, unknownOpaqueByte);
+
+        int opaqueMicroTriangles = 0;
+        int transparentMicroTriangles = 0;
+        int mixedMicroTriangles = 0;
+        int unsafeMicroTriangles = 0;
+        int nullSpriteMicroTriangles = 0;
+        int animatedTris = 0;
+        int nullSpriteTris = 0;
+        int[] indices = cutout.idx.elements();
+        float[] uvs = cutout.uvList.elements();
+        for (int t = 0; t < triCount; t++) {
+            TextureAtlasSprite sprite = cutout.ommSprites.get(t);
+            if (sprite == null) {
+                nullSpriteTris++;
+                nullSpriteMicroTriangles += microCount;
+                continue;
+            }
+            maybeWriteOmmDebugImage(sprite, level, indices, uvs, t);
+            if (sprite.transparency().isOpaque()) {
+                for (int m = 0; m < microCount; m++) {
+                    writeOmmValue(data, t, bytesPerTriangle, m, OMM_FULLY_OPAQUE);
+                }
+                opaqueMicroTriangles += microCount;
+                continue;
+            }
+            if (sprite.isAnimated()) {
+                animatedTris++;
+            }
+            OmmMicroCounts counts = writeClassifiedMicroTriangles(data, t, bytesPerTriangle, level, sprite, indices, uvs);
+            opaqueMicroTriangles += counts.opaque();
+            transparentMicroTriangles += counts.transparent();
+            mixedMicroTriangles += counts.mixed();
+            unsafeMicroTriangles += counts.unsafe();
+        }
+        int classifiedMicroTriangles = opaqueMicroTriangles + transparentMicroTriangles;
+        recordOmmStats(triCount, level, microCount, opaqueMicroTriangles, transparentMicroTriangles,
+                mixedMicroTriangles, unsafeMicroTriangles, nullSpriteMicroTriangles, animatedTris, nullSpriteTris,
+                classifiedMicroTriangles > 0);
+        if (classifiedMicroTriangles == 0) {
+            return null;
+        }
+        return new RtAccel.OpacityMicromapInput(data, triCount, level, bytesPerTriangle);
+    }
+
+    private static void recordOmmStatsDisabled() {
+        if (!OMM_STATS) {
+            return;
+        }
+        OMM_STATS_SECTIONS.incrementAndGet();
+        OMM_STATS_DISABLED_SECTIONS.incrementAndGet();
+        maybeLogOmmStats(0);
+    }
+
+    private static void recordOmmStats(int triCount, int level, int microCount, int opaqueMicroTriangles,
+                                       int transparentMicroTriangles, int mixedMicroTriangles,
+                                       int unsafeMicroTriangles, int nullSpriteMicroTriangles,
+                                       int animatedTris, int nullSpriteTris, boolean emitted) {
+        if (!OMM_STATS) {
+            return;
+        }
+        OMM_STATS_SECTIONS.incrementAndGet();
+        if (triCount > 0) {
+            OMM_STATS_CUTOUT_SECTIONS.incrementAndGet();
+            OMM_STATS_CUTOUT_TRIS.addAndGet(triCount);
+            OMM_STATS_TOTAL_MICROS.addAndGet((long) triCount * microCount);
+            OMM_STATS_OPAQUE_MICROS.addAndGet(opaqueMicroTriangles);
+            OMM_STATS_TRANSPARENT_MICROS.addAndGet(transparentMicroTriangles);
+            OMM_STATS_MIXED_MICROS.addAndGet(mixedMicroTriangles);
+            OMM_STATS_UNSAFE_MICROS.addAndGet(unsafeMicroTriangles);
+            OMM_STATS_NULL_SPRITE_MICROS.addAndGet(nullSpriteMicroTriangles);
+            OMM_STATS_ANIMATED_TRIS.addAndGet(animatedTris);
+            OMM_STATS_NULL_SPRITE_TRIS.addAndGet(nullSpriteTris);
+        }
+        if (emitted) {
+            OMM_STATS_MICROMAP_SECTIONS.incrementAndGet();
+        }
+        maybeLogOmmStats(level);
+    }
+
+    private static void maybeLogOmmStats(int level) {
+        long now = System.nanoTime();
+        long last = OMM_STATS_LAST_LOG.get();
+        if (last != 0L && now - last < OMM_STATS_INTERVAL_NANOS) {
+            return;
+        }
+        if (!OMM_STATS_LAST_LOG.compareAndSet(last, now)) {
+            return;
+        }
+        long totalMicros = OMM_STATS_TOTAL_MICROS.get();
+        long opaqueMicros = OMM_STATS_OPAQUE_MICROS.get();
+        long transparentMicros = OMM_STATS_TRANSPARENT_MICROS.get();
+        long mixedMicros = OMM_STATS_MIXED_MICROS.get();
+        long unsafeMicros = OMM_STATS_UNSAFE_MICROS.get();
+        long nullSpriteMicros = OMM_STATS_NULL_SPRITE_MICROS.get();
+        long unknownMicros = Math.max(0L, totalMicros - opaqueMicros - transparentMicros);
+        double opaquePct = totalMicros == 0 ? 0.0 : (opaqueMicros * 100.0) / totalMicros;
+        double transparentPct = totalMicros == 0 ? 0.0 : (transparentMicros * 100.0) / totalMicros;
+        double unknownPct = totalMicros == 0 ? 0.0 : (unknownMicros * 100.0) / totalMicros;
+        UpscalerMod.LOGGER.info(
+                "RT terrain OMM stats: enabled={}, level={}, sections={}, cutoutSections={}, micromapSections={}, "
+                        + "cutoutTris={}, opaqueMicros={}/{} ({}%), transparentMicros={}/{} ({}%), "
+                        + "unknownMicros={}/{} ({}%; mixed={}, unsafe={}, nullSprite={}), "
+                        + "animatedTris={}, nullSpriteTris={}, disabledSections={}",
+                RtDeviceBringup.ommEnabled(), level, OMM_STATS_SECTIONS.get(), OMM_STATS_CUTOUT_SECTIONS.get(),
+                OMM_STATS_MICROMAP_SECTIONS.get(), OMM_STATS_CUTOUT_TRIS.get(), opaqueMicros, totalMicros,
+                String.format(java.util.Locale.ROOT, "%.1f", opaquePct), transparentMicros, totalMicros,
+                String.format(java.util.Locale.ROOT, "%.1f", transparentPct), unknownMicros, totalMicros,
+                String.format(java.util.Locale.ROOT, "%.1f", unknownPct), mixedMicros, unsafeMicros, nullSpriteMicros,
+                OMM_STATS_ANIMATED_TRIS.get(), OMM_STATS_NULL_SPRITE_TRIS.get(), OMM_STATS_DISABLED_SECTIONS.get());
+    }
+
+    private static int opacityMicromapSubdivisionLevel() {
+        int max = Math.max(0, Math.min(12, RtDeviceBringup.maxOpacity4StateSubdivisionLevel()));
+        return Math.max(0, Math.min(OMM_SUBDIVISION, max));
+    }
+
+    private record OmmMicroCounts(int opaque, int transparent, int mixed, int unsafe) {
+    }
+
+    private static OmmMicroCounts writeClassifiedMicroTriangles(byte[] data, int tri, int bytesPerTriangle, int level,
+                                                                TextureAtlasSprite sprite, int[] indices, float[] uvs) {
+        int i0 = indices[tri * 3];
+        int i1 = indices[tri * 3 + 1];
+        int i2 = indices[tri * 3 + 2];
+        int uv0 = i0 * 2;
+        int uv1 = i1 * 2;
+        int uv2 = i2 * 2;
+        float u0 = uvs[uv0], v0 = uvs[uv0 + 1];
+        float u1 = uvs[uv1], v1 = uvs[uv1 + 1];
+        float u2 = uvs[uv2], v2 = uvs[uv2 + 1];
+        int grid = 1 << level;
+        float invGrid = 1.0f / grid;
+        int opaque = 0;
+        int transparent = 0;
+        int mixed = 0;
+        int unsafe = 0;
+        for (int i = 0; i < grid; i++) {
+            for (int j = 0; i + j < grid; j++) {
+                float b0 = i * invGrid;
+                float c0 = j * invGrid;
+                float b1 = (i + 1) * invGrid;
+                float c1 = j * invGrid;
+                float b2 = i * invGrid;
+                float c2 = (j + 1) * invGrid;
+                int state = microTriangleOmmState(sprite, u0, v0, u1, v1, u2, v2, b0, c0, b1, c1, b2, c2);
+                if (state == OMM_FULLY_OPAQUE || state == OMM_FULLY_TRANSPARENT) {
+                    writeClassifiedOmmValue(data, tri, bytesPerTriangle, level,
+                            (i + 1.0f / 3.0f) * invGrid, (j + 1.0f / 3.0f) * invGrid, state);
+                    if (state == OMM_FULLY_OPAQUE) {
+                        opaque++;
+                    } else {
+                        transparent++;
+                    }
+                } else if (state == OMM_CLASS_MIXED) {
+                    mixed++;
+                } else {
+                    unsafe++;
+                }
+                if (i + j < grid - 1) {
+                    float b3 = (i + 1) * invGrid;
+                    float c3 = (j + 1) * invGrid;
+                    state = microTriangleOmmState(sprite, u0, v0, u1, v1, u2, v2, b1, c1, b3, c3, b2, c2);
+                    if (state == OMM_FULLY_OPAQUE || state == OMM_FULLY_TRANSPARENT) {
+                        writeClassifiedOmmValue(data, tri, bytesPerTriangle, level,
+                                (i + 2.0f / 3.0f) * invGrid, (j + 2.0f / 3.0f) * invGrid, state);
+                        if (state == OMM_FULLY_OPAQUE) {
+                            opaque++;
+                        } else {
+                            transparent++;
+                        }
+                    } else if (state == OMM_CLASS_MIXED) {
+                        mixed++;
+                    } else {
+                        unsafe++;
+                    }
+                }
+            }
+        }
+        return new OmmMicroCounts(opaque, transparent, mixed, unsafe);
+    }
+
+    private static void maybeWriteOmmDebugImage(TextureAtlasSprite sprite, int level, int[] indices, float[] uvs, int tri) {
+        if (!OMM_DEBUG_IMAGES || OMM_DEBUG_IMAGE_LIMIT <= 0) {
+            return;
+        }
+        int i0 = indices[tri * 3];
+        int i1 = indices[tri * 3 + 1];
+        int i2 = indices[tri * 3 + 2];
+        int uv0 = i0 * 2;
+        int uv1 = i1 * 2;
+        int uv2 = i2 * 2;
+        float u0 = uvs[uv0], v0 = uvs[uv0 + 1];
+        float u1 = uvs[uv1], v1 = uvs[uv1 + 1];
+        float u2 = uvs[uv2], v2 = uvs[uv2 + 1];
+        String spriteName = sprite.contents().name().toString();
+        String key = spriteName + ":" + level + ":" + Float.floatToIntBits(u0) + ":" + Float.floatToIntBits(v0)
+                + ":" + Float.floatToIntBits(u1) + ":" + Float.floatToIntBits(v1)
+                + ":" + Float.floatToIntBits(u2) + ":" + Float.floatToIntBits(v2);
+        if (!OMM_DEBUG_IMAGE_KEYS.add(key)) {
+            return;
+        }
+        int index = OMM_DEBUG_IMAGES_WRITTEN.getAndIncrement();
+        if (index >= OMM_DEBUG_IMAGE_LIMIT) {
+            OMM_DEBUG_IMAGE_KEYS.remove(key);
+            return;
+        }
+        try {
+            writeOmmDebugImage(index, sprite, spriteName, key, level, u0, v0, u1, v1, u2, v2);
+        } catch (Exception e) {
+            UpscalerMod.LOGGER.warn("RT terrain OMM debug image write failed", e);
+        }
+    }
+
+    private static void writeOmmDebugImage(int index, TextureAtlasSprite sprite, String spriteName, String key, int level,
+                                           float u0, float v0, float u1, float v1, float u2, float v2)
+            throws IOException {
+        var contents = sprite.contents();
+        NativeImage nativeImage = ((SpriteContentsAccessor) contents).upscaler$originalImage();
+        int width = Math.max(1, contents.width());
+        int height = Math.max(1, contents.height());
+        int frameRowSize = Math.max(1, nativeImage.getWidth() / width);
+        var frames = contents.getUniqueFrames();
+        int frame = frames.size() > 0 ? frames.getInt(0) : 0;
+        int frameX = (frame % frameRowSize) * width;
+        int frameY = (frame / frameRowSize) * height;
+
+        BufferedImage base = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        int imgW = nativeImage.getWidth();
+        int imgH = nativeImage.getHeight();
+        for (int y = 0; y < height; y++) {
+            int sy = frameY + y;
+            if (sy < 0 || sy >= imgH) {
+                continue;
+            }
+            for (int x = 0; x < width; x++) {
+                int sx = frameX + x;
+                if (sx < 0 || sx >= imgW) {
+                    continue;
+                }
+                base.setRGB(x, y, nativeImage.getPixel(sx, sy));
+            }
+        }
+
+        int target = Math.max(128, OMM_DEBUG_IMAGE_SIZE);
+        double scale = Math.max(1.0, target / (double) Math.max(width, height));
+        int outW = Math.max(1, (int) Math.ceil(width * scale));
+        int outH = Math.max(1, (int) Math.ceil(height * scale));
+        BufferedImage out = new BufferedImage(outW, outH, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = out.createGraphics();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+            g.drawImage(base, 0, 0, outW, outH, null);
+            g.setStroke(new BasicStroke(Math.max(1.0f, (float) scale * 0.04f)));
+
+            int grid = 1 << level;
+            float invGrid = 1.0f / grid;
+            int opaque = 0;
+            int transparent = 0;
+            int mixed = 0;
+            int unsafe = 0;
+            for (int i = 0; i < grid; i++) {
+                for (int j = 0; i + j < grid; j++) {
+                    int state = drawOmmDebugMicro(g, sprite, outW, outH, u0, v0, u1, v1, u2, v2,
+                            i * invGrid, j * invGrid, (i + 1) * invGrid, j * invGrid,
+                            i * invGrid, (j + 1) * invGrid);
+                    if (state == OMM_FULLY_OPAQUE) {
+                        opaque++;
+                    } else if (state == OMM_FULLY_TRANSPARENT) {
+                        transparent++;
+                    } else if (state == OMM_CLASS_MIXED) {
+                        mixed++;
+                    } else {
+                        unsafe++;
+                    }
+                    if (i + j < grid - 1) {
+                        state = drawOmmDebugMicro(g, sprite, outW, outH, u0, v0, u1, v1, u2, v2,
+                                (i + 1) * invGrid, j * invGrid, (i + 1) * invGrid, (j + 1) * invGrid,
+                                i * invGrid, (j + 1) * invGrid);
+                        if (state == OMM_FULLY_OPAQUE) {
+                            opaque++;
+                        } else if (state == OMM_FULLY_TRANSPARENT) {
+                            transparent++;
+                        } else if (state == OMM_CLASS_MIXED) {
+                            mixed++;
+                        } else {
+                            unsafe++;
+                        }
+                    }
+                }
+            }
+
+            g.setStroke(new BasicStroke(Math.max(2.0f, (float) scale * 0.08f)));
+            g.setColor(Color.WHITE);
+            g.draw(ommDebugPath(sprite, outW, outH, u0, v0, u1, v1, u2, v2, 0f, 0f, 1f, 0f, 0f, 1f));
+            drawOmmDebugLegend(g, outW, outH, spriteName, level, opaque, transparent, mixed, unsafe);
+
+            Files.createDirectories(OMM_DEBUG_IMAGE_DIR);
+            String fileName = String.format(java.util.Locale.ROOT, "%02d_%s_L%d_o%d_t%d_m%d_u%d_%08x.png",
+                    index, sanitizeOmmDebugName(spriteName), level, opaque, transparent, mixed, unsafe, key.hashCode());
+            Path file = OMM_DEBUG_IMAGE_DIR.resolve(fileName);
+            ImageIO.write(out, "png", file.toFile());
+            UpscalerMod.LOGGER.info("RT terrain OMM debug image wrote {}", file.toAbsolutePath());
+        } finally {
+            g.dispose();
+        }
+    }
+
+    private static int drawOmmDebugMicro(Graphics2D g, TextureAtlasSprite sprite, int outW, int outH,
+                                         float u0, float v0, float u1, float v1, float u2, float v2,
+                                         float b0, float c0, float b1, float c1, float b2, float c2) {
+        int state = microTriangleOmmState(sprite, u0, v0, u1, v1, u2, v2, b0, c0, b1, c1, b2, c2);
+        Path2D.Float path = ommDebugPath(sprite, outW, outH, u0, v0, u1, v1, u2, v2, b0, c0, b1, c1, b2, c2);
+        g.setColor(ommDebugFill(state));
+        g.fill(path);
+        g.setColor(ommDebugStroke(state));
+        g.draw(path);
+        return state;
+    }
+
+    private static Path2D.Float ommDebugPath(TextureAtlasSprite sprite, int outW, int outH,
+                                             float u0, float v0, float u1, float v1, float u2, float v2,
+                                             float b0, float c0, float b1, float c1, float b2, float c2) {
+        float tu0 = triangleUv(u0, u1, u2, b0, c0);
+        float tv0 = triangleUv(v0, v1, v2, b0, c0);
+        float tu1 = triangleUv(u0, u1, u2, b1, c1);
+        float tv1 = triangleUv(v0, v1, v2, b1, c1);
+        float tu2 = triangleUv(u0, u1, u2, b2, c2);
+        float tv2 = triangleUv(v0, v1, v2, b2, c2);
+        Path2D.Float path = new Path2D.Float();
+        path.moveTo(ommDebugX(sprite, tu0, outW), ommDebugY(sprite, tv0, outH));
+        path.lineTo(ommDebugX(sprite, tu1, outW), ommDebugY(sprite, tv1, outH));
+        path.lineTo(ommDebugX(sprite, tu2, outW), ommDebugY(sprite, tv2, outH));
+        path.closePath();
+        return path;
+    }
+
+    private static float ommDebugX(TextureAtlasSprite sprite, float u, int outW) {
+        float span = sprite.getU1() - sprite.getU0();
+        return span == 0.0f ? 0.0f : ((u - sprite.getU0()) / span) * outW;
+    }
+
+    private static float ommDebugY(TextureAtlasSprite sprite, float v, int outH) {
+        float span = sprite.getV1() - sprite.getV0();
+        return span == 0.0f ? 0.0f : ((v - sprite.getV0()) / span) * outH;
+    }
+
+    private static Color ommDebugFill(int state) {
+        return switch (state) {
+            case OMM_FULLY_OPAQUE -> new Color(30, 220, 80, 96);
+            case OMM_FULLY_TRANSPARENT -> new Color(40, 160, 255, 96);
+            case OMM_CLASS_MIXED -> new Color(255, 190, 40, 112);
+            default -> new Color(255, 40, 180, 112);
+        };
+    }
+
+    private static Color ommDebugStroke(int state) {
+        return switch (state) {
+            case OMM_FULLY_OPAQUE -> new Color(20, 255, 80, 220);
+            case OMM_FULLY_TRANSPARENT -> new Color(70, 200, 255, 220);
+            case OMM_CLASS_MIXED -> new Color(255, 220, 40, 230);
+            default -> new Color(255, 60, 210, 230);
+        };
+    }
+
+    private static void drawOmmDebugLegend(Graphics2D g, int outW, int outH, String spriteName, int level,
+                                           int opaque, int transparent, int mixed, int unsafe) {
+        g.setFont(new Font(Font.MONOSPACED, Font.BOLD, Math.max(11, outW / 42)));
+        String line1 = "OMM L" + level + " " + spriteName;
+        String line2 = "green opaque=" + opaque + "  blue transparent=" + transparent
+                + "  yellow mixed=" + mixed + "  magenta unsafe=" + unsafe;
+        int pad = Math.max(6, outW / 64);
+        int h = g.getFontMetrics().getHeight();
+        int boxH = h * 2 + pad * 3;
+        g.setColor(new Color(0, 0, 0, 180));
+        g.fillRect(0, Math.max(0, outH - boxH), outW, boxH);
+        g.setColor(Color.WHITE);
+        g.drawString(line1, pad, outH - boxH + pad + h - g.getFontMetrics().getDescent());
+        g.drawString(line2, pad, outH - boxH + pad * 2 + h * 2 - g.getFontMetrics().getDescent());
+    }
+
+    private static String sanitizeOmmDebugName(String name) {
+        String safe = name.replaceAll("[^A-Za-z0-9._-]+", "_");
+        return safe.length() > 80 ? safe.substring(safe.length() - 80) : safe;
+    }
+
+    private static void writeClassifiedOmmValue(byte[] data, int tri, int bytesPerTriangle, int level,
+                                                float b, float c, int state) {
+        int microIndex = barycentricsToOmmIndex(b, c, level);
+        writeOmmValue(data, tri, bytesPerTriangle, microIndex, state);
+    }
+
+    private static int microTriangleOmmState(TextureAtlasSprite sprite, float u0, float v0, float u1, float v1,
+                                             float u2, float v2, float b0, float c0, float b1, float c1,
+                                             float b2, float c2) {
+        float tu0 = triangleUv(u0, u1, u2, b0, c0);
+        float tv0 = triangleUv(v0, v1, v2, b0, c0);
+        float tu1 = triangleUv(u0, u1, u2, b1, c1);
+        float tv1 = triangleUv(v0, v1, v2, b1, c1);
+        float tu2 = triangleUv(u0, u1, u2, b2, c2);
+        float tv2 = triangleUv(v0, v1, v2, b2, c2);
+        float minU = Math.min(tu0, Math.min(tu1, tu2));
+        float maxU = Math.max(tu0, Math.max(tu1, tu2));
+        float minV = Math.min(tv0, Math.min(tv1, tv2));
+        float maxV = Math.max(tv0, Math.max(tv1, tv2));
+        return spriteRegionOmmState(sprite, minU, minV, maxU, maxV);
+    }
+
+    private static float triangleUv(float v0, float v1, float v2, float b, float c) {
+        return v0 + (v1 - v0) * b + (v2 - v0) * c;
+    }
+
+    private static int spriteRegionOmmState(TextureAtlasSprite sprite, float minU, float minV, float maxU, float maxV) {
+        if (!Float.isFinite(minU) || !Float.isFinite(minV) || !Float.isFinite(maxU) || !Float.isFinite(maxV)) {
+            return OMM_CLASS_UNSAFE;
+        }
+        float spanU = sprite.getU1() - sprite.getU0();
+        float spanV = sprite.getV1() - sprite.getV0();
+        if (Math.abs(spanU) < 1.0e-12f || Math.abs(spanV) < 1.0e-12f) {
+            return OMM_CLASS_UNSAFE;
+        }
+        float localMinU = (minU - sprite.getU0()) / spanU;
+        float localMaxU = (maxU - sprite.getU0()) / spanU;
+        float localMinV = (minV - sprite.getV0()) / spanV;
+        float localMaxV = (maxV - sprite.getV0()) / spanV;
+        if (localMinU > localMaxU) {
+            float tmp = localMinU;
+            localMinU = localMaxU;
+            localMaxU = tmp;
+        }
+        if (localMinV > localMaxV) {
+            float tmp = localMinV;
+            localMinV = localMaxV;
+            localMaxV = tmp;
+        }
+        var contents = sprite.contents();
+        // Tolerance is for the out-of-range UNSAFE check ONLY. Do NOT add it to the sampled
+        // region: a half-texel pad makes every micro-triangle's footprint floor()/ceil() into
+        // its neighbour texels on all four sides, so any cutout texture classifies MIXED.
+        float tolU = 0.5f / Math.max(1, contents.width());
+        float tolV = 0.5f / Math.max(1, contents.height());
+        if (localMinU < -tolU || localMaxU > 1.0f + tolU || localMinV < -tolV || localMaxV > 1.0f + tolV) {
+            return OMM_CLASS_UNSAFE;
+        }
+        localMinU = clamp01(localMinU);
+        localMaxU = clamp01(localMaxU);
+        localMinV = clamp01(localMinV);
+        localMaxV = clamp01(localMaxV);
+        return spriteRegionCutoutState(contents, localMinU, localMinV, localMaxU, localMaxV);
+    }
+
+    private static int spriteRegionCutoutState(net.minecraft.client.renderer.texture.SpriteContents contents,
+                                               float minU, float minV, float maxU, float maxV) {
+        int width = contents.width();
+        int height = contents.height();
+        // Inset by a sub-texel epsilon so a footprint whose edges sit exactly on texel
+        // boundaries (the common case once the micro-grid aligns to the texture grid)
+        // resolves to the texels it truly covers, instead of bleeding into the neighbour
+        // texel through floor()/ceil() floating-point noise at the boundary.
+        final float eps = 1.0e-3f;
+        int x0 = Math.max(0, Math.min(width, (int) Math.floor(minU * width + eps)));
+        int y0 = Math.max(0, Math.min(height, (int) Math.floor(minV * height + eps)));
+        int x1 = Math.max(0, Math.min(width, (int) Math.ceil(maxU * width - eps)));
+        int y1 = Math.max(0, Math.min(height, (int) Math.ceil(maxV * height - eps)));
+        // A footprint narrower than one texel still has to sample the texel containing it.
+        if (x1 <= x0) {
+            x1 = Math.min(width, x0 + 1);
+        }
+        if (y1 <= y0) {
+            y1 = Math.min(height, y0 + 1);
+        }
+        if (x0 >= x1 || y0 >= y1) {
+            return OMM_CLASS_UNSAFE;
+        }
+        var image = ((SpriteContentsAccessor) contents).upscaler$originalImage();
+        int frameRowSize = Math.max(1, image.getWidth() / Math.max(1, width));
+        var frames = contents.getUniqueFrames();
+        boolean anyPass = false;
+        boolean anyFail = false;
+        int frameCount = contents.isAnimated() ? frames.size() : 1;
+        for (int f = 0; f < frameCount; f++) {
+            int frame = contents.isAnimated() ? frames.getInt(f) : 0;
+            int frameX = (frame % frameRowSize) * width;
+            int frameY = (frame / frameRowSize) * height;
+            for (int y = y0; y < y1; y++) {
+                for (int x = x0; x < x1; x++) {
+                    int alpha = ARGB.alpha(image.getPixel(frameX + x, frameY + y));
+                    if (alpha >= OMM_ALPHA_CUTOFF) {
+                        anyPass = true;
+                    } else {
+                        anyFail = true;
+                    }
+                    if (anyPass && anyFail) {
+                        return OMM_CLASS_MIXED;
+                    }
+                }
+            }
+        }
+        if (anyPass) {
+            return OMM_FULLY_OPAQUE;
+        }
+        return anyFail ? OMM_FULLY_TRANSPARENT : OMM_CLASS_UNSAFE;
+    }
+
+    private static float clamp01(float v) {
+        return Math.max(0.0f, Math.min(1.0f, v));
+    }
+
+    private static void writeOmmValue(byte[] data, int triangle, int bytesPerTriangle, int microIndex, int value) {
+        int bit = (triangle * bytesPerTriangle << 3) + microIndex * 2;
+        int byteIndex = bit >>> 3;
+        int shift = bit & 7;
+        int mask = 0x3 << shift;
+        int cur = data[byteIndex] & 0xFF;
+        data[byteIndex] = (byte) ((cur & ~mask) | ((value & 0x3) << shift));
+    }
+
+    private static int barycentricsToOmmIndex(float u, float v, int level) {
+        u = clamp01(u);
+        v = clamp01(v);
+        int dim = 1 << level;
+        float fu = u * dim;
+        float fv = v * dim;
+        int iu = (int) fu;
+        int iv = (int) fv;
+        float uf = fu - iu;
+        float vf = fv - iv;
+        if (iu >= dim) {
+            iu = dim - 1;
+        }
+        if (iv >= dim) {
+            iv = dim - 1;
+        }
+        int iuv = iu + iv;
+        if (iuv >= dim) {
+            iu -= iuv - dim + 1;
+        }
+        int iw = ~(iu + iv);
+        if (uf + vf >= 1.0f && iuv < dim - 1) {
+            --iw;
+        }
+        int b0 = ~(iu ^ iw);
+        b0 &= dim - 1;
+        int t = (iu ^ iv) & b0;
+        int f = t;
+        f ^= f >>> 1;
+        f ^= f >>> 2;
+        f ^= f >>> 4;
+        f ^= f >>> 8;
+        int b1 = ((f ^ iu) & ~b0) | t;
+        b0 = (b0 | (b0 << 8)) & 0x00ff00ff;
+        b0 = (b0 | (b0 << 4)) & 0x0f0f0f0f;
+        b0 = (b0 | (b0 << 2)) & 0x33333333;
+        b0 = (b0 | (b0 << 1)) & 0x55555555;
+        b1 = (b1 | (b1 << 8)) & 0x00ff00ff;
+        b1 = (b1 | (b1 << 4)) & 0x0f0f0f0f;
+        b1 = (b1 | (b1 << 2)) & 0x33333333;
+        b1 = (b1 | (b1 << 1)) & 0x55555555;
+        return b0 | (b1 << 1);
     }
 
     /**
@@ -624,14 +1262,14 @@ public final class RtTerrain {
         long key = sectionKey(sx, sy, sz);
         RenderSectionRegion region = regionCache.createRegion(level, SectionPos.asLong(sx, sy, sz));
         long token = ++tessToken;
-        Future<SectionMesh> future = RtWorkerPool.INSTANCE.submit(() -> {
+        Future<CpuSection> future = RtWorkerPool.INSTANCE.submit(() -> {
             ModelBlockRenderer renderer = new ModelBlockRenderer(false, true, blockColors);
             QuadCapture capture = new QuadCapture();
             capture.blockColors = blockColors;
             FluidRenderer fluidRenderer = new FluidRenderer(fluidModelSet);
             FluidCapture fluidCapture = new FluidCapture();
             BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
-            return tessellate(region, modelSet, renderer, capture, fluidRenderer, fluidCapture, m, sx, sy, sz);
+            return buildCpuSection(region, modelSet, renderer, capture, fluidRenderer, fluidCapture, m, sx, sy, sz);
         });
         inFlight.put(key, token);
         jobs.add(new TessJob(key, token, sx << 4, sy << 4, sz << 4, future));
@@ -650,9 +1288,9 @@ public final class RtTerrain {
                 continue;
             }
             it.remove();
-            SectionMesh mesh;
+            CpuSection cpu;
             try {
-                mesh = job.future().get();
+                cpu = job.future().get();
             } catch (Exception e) {
                 inFlight.remove(job.key());
                 if (!loggedTessFailure) {
@@ -668,6 +1306,7 @@ public final class RtTerrain {
                 continue; // stale result; a newer dispatch (or none) supersedes it
             }
             inFlight.remove(job.key());
+            SectionMesh mesh = cpu.mesh();
             if (mesh.isEmpty()) {
                 // Legitimately empty (air or fully-enclosed). If this was an in-place re-extract whose new
                 // state is empty, evict the old geom and retire it via the build swap (a startBuild runs
@@ -678,10 +1317,14 @@ public final class RtTerrain {
                 }
                 empty.add(job.key());
             } else {
-                prepared.add(uploadSection(ctx, mesh, job.key(), job.sox(), job.soy(), job.soz()));
+                prepared.add(uploadSection(ctx, mesh, cpu.opacityMicromap(), job.key(), job.sox(), job.soy(), job.soz()));
                 budget--;
             }
         }
+    }
+
+    /** Pure-CPU worker result: tessellated mesh plus optional opacity micromap input for its cutout bucket. */
+    private record CpuSection(SectionMesh mesh, RtAccel.OpacityMicromapInput opacityMicromap) {
     }
 
     /** A section tessellated + uploaded with a prepared (not-yet-built) BLAS, pending the batch build. */
@@ -693,8 +1336,8 @@ public final class RtTerrain {
     private record Deferred(long freeFrame, Runnable free) {
     }
 
-    /** An outstanding async tessellation: {@code future} yields the section's CPU mesh on a worker. */
-    private record TessJob(long key, long token, int sox, int soy, int soz, Future<SectionMesh> future) {
+    /** An outstanding async tessellation: {@code future} yields the section's CPU payload on a worker. */
+    private record TessJob(long key, long token, int sox, int soy, int soz, Future<CpuSection> future) {
     }
 
     /** An in-flight async BLAS build: the new section geometry/instances land when {@code op} completes. */
@@ -930,6 +1573,9 @@ public final class RtTerrain {
         // One sprite per prim record (per triangle), aligned with `prim`. Resolved to hasS/hasN on the
         // render thread (RtBlockMaterials.ensure touches the GPU) — null when no LabPBR ingestion applies.
         final List<TextureAtlasSprite> triSprites = new ArrayList<>();
+        // One sprite per triangle for opacity micromap classification. Kept separate from triSprites so OMM
+        // still works when LabPBR material ingestion is disabled.
+        final List<TextureAtlasSprite> ommSprites = new ArrayList<>();
 
         int triCount() {
             return idx.size() / 3;
@@ -1015,7 +1661,8 @@ public final class RtTerrain {
             // = 1 if an _n map exists (per-texel normal). The ingest (RtBlockMaterials.ensure) creates GPU
             // textures, so it's deferred to the render thread: record the sprite per triangle and write a
             // 0 placeholder now; resolveMaterials() patches hasS/hasN before upload.
-            TextureAtlasSprite sprite = RtMaterials.ENABLED ? quad.materialInfo().sprite() : null;
+            TextureAtlasSprite sprite = quad.materialInfo().sprite();
+            TextureAtlasSprite materialSprite = RtMaterials.ENABLED ? sprite : null;
 
             FloatArrayList prim = g.prim;
             for (int t = 0; t < 2; t++) { // one {normal+emission, tint, mat} record per triangle
@@ -1031,7 +1678,8 @@ public final class RtTerrain {
                 prim.add(metal);
                 prim.add(0f); // hasS placeholder — patched in resolveMaterials()
                 prim.add(0f); // hasN placeholder
-                g.triSprites.add(sprite);
+                g.triSprites.add(materialSprite);
+                g.ommSprites.add(sprite);
             }
         }
 
@@ -1134,6 +1782,7 @@ public final class RtTerrain {
                 prim.add(0f); // hasS (fluids carry no LabPBR atlas material)
                 prim.add(0f); // hasN
                 g.triSprites.add(null); // keep triSprites aligned 1:1 with prim records
+                g.ommSprites.add(null);
             }
         }
 

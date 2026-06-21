@@ -7,6 +7,7 @@ import org.lwjgl.vulkan.VkCommandBuffer;
 final class RtDebugLabels {
     private static final String PREFIX = "RT ";
     private static final int VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR = 1000150000;
+    private static final int VK_OBJECT_TYPE_MICROMAP_EXT = 1000396000;
 
     private RtDebugLabels() {
     }
@@ -32,6 +33,10 @@ final class RtDebugLabels {
 
     static void nameAccelerationStructure(RtContext ctx, long handle, String label) {
         name(ctx, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, handle, label);
+    }
+
+    static void nameMicromap(RtContext ctx, long handle, String label) {
+        name(ctx, VK_OBJECT_TYPE_MICROMAP_EXT, handle, label);
     }
 
     static Scope scope(RtContext ctx, VkCommandBuffer cmd, String label) {

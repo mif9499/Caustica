@@ -29,6 +29,7 @@ import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 
 import static dev.upscaler.rt.RtContext.check;
+import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
 import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
@@ -288,6 +289,9 @@ public final class RtPipeline {
             // Depth 1: secondary shadow/visibility rays are issued sequentially from raygen (not
             // nested in closest-hit), so each traceRayEXT is depth 1 — no recursion budget needed.
             rtpci.get(0).sType$Default().pStages(stages).pGroups(groups).maxPipelineRayRecursionDepth(1).layout(layout);
+            if (RtDeviceBringup.ommEnabled()) {
+                rtpci.get(0).flags(VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT);
+            }
             LongBuffer pPipeline = stack.mallocLong(1);
             check(vkCreateRayTracingPipelinesKHR(vk, VK10.VK_NULL_HANDLE, VK10.VK_NULL_HANDLE, rtpci, null, pPipeline),
                     "vkCreateRayTracingPipelinesKHR");

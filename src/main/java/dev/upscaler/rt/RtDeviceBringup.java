@@ -17,6 +17,8 @@ import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPipelinePropertiesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
+import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapFeaturesEXT;
+import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapPropertiesEXT;
 import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 
 import java.util.HashSet;
@@ -30,6 +32,9 @@ import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_KHR_RAY_TRACING_PIPELINE
 import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
 import static org.lwjgl.vulkan.KHRRayTracingPositionFetch.VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRRayTracingPositionFetch.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
+import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME;
+import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
+import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_PROPERTIES_EXT;
 
 /**
  * P0 — RT bring-up. Enables the hardware ray-tracing device extensions and their
@@ -73,10 +78,25 @@ public final class RtDeviceBringup {
             VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
             VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
 
+    /**
+     * OPTIONAL RT extensions: enabled only when the selected device supports them AND the gate is on, but
+     * never required — a device lacking them still comes up RT-capable (unlike {@link #RT_EXTENSIONS}, whose
+     * absence disables RT entirely). {@code VK_EXT_opacity_micromap} (any-hit opt, lever C): per-triangle
+     * opacity micromaps let the hardware skip {@code world.rahit} on fully-opaque/transparent cutout micro-
+     * triangles, so the alpha-test any-hit runs only on the foliage silhouette. Hardware-accelerated on RTX
+     * 40-series and Blackwell; absent / software elsewhere, hence optional.
+     */
+    public static final boolean ENABLE_OMM =
+            Boolean.parseBoolean(System.getProperty("upscaler.rt.omm", "true"));
+    public static final List<String> OPTIONAL_RT_EXTENSIONS = List.of(
+            VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+
     /** Set by SodiumCompat once the RT extension names are registered in Sodium's registry. */
     public static volatile boolean sodiumExtensionsRegistered = false;
 
     private static volatile boolean rtRequested;
+    private static volatile boolean ommEnabled; // VK_EXT_opacity_micromap actually enabled on the device
+    private static volatile int maxOpacity4StateSubdivisionLevel;
     private static boolean loggedUnavailable;
 
     private RtDeviceBringup() {
@@ -85,6 +105,24 @@ public final class RtDeviceBringup {
     /** True once we have augmented a device creation to request RT (extensions + features). */
     public static boolean rtRequested() {
         return rtRequested;
+    }
+
+    /** True if {@code VK_EXT_opacity_micromap} was enabled on the device (gate on + device support). */
+    public static boolean ommEnabled() {
+        return ommEnabled;
+    }
+
+    /** Hardware limit for 4-state opacity micromaps, populated by {@link #probe(VkDevice)}. */
+    public static int maxOpacity4StateSubdivisionLevel() {
+        return maxOpacity4StateSubdivisionLevel;
+    }
+
+    /** Optional extensions the gate wants AND the device supports — added but never required. */
+    private static List<String> supportedOptionalExtensions(VulkanPhysicalDevice physicalDevice) {
+        if (!ENABLE_OMM) {
+            return List.of();
+        }
+        return OPTIONAL_RT_EXTENSIONS.stream().filter(physicalDevice::hasDeviceExtension).toList();
     }
 
     private static String firstUnsupported(VulkanPhysicalDevice physicalDevice) {
@@ -102,6 +140,11 @@ public final class RtDeviceBringup {
             return;
         }
         for (String ext : RT_EXTENSIONS) {
+            if (!augmentedExtensions.contains(ext)) {
+                augmentedExtensions.add(ext);
+            }
+        }
+        for (String ext : supportedOptionalExtensions(physicalDevice)) {
             if (!augmentedExtensions.contains(ext)) {
                 augmentedExtensions.add(ext);
             }
@@ -160,12 +203,24 @@ public final class RtDeviceBringup {
                 VkPhysicalDeviceRayTracingPipelineFeaturesKHR.RAYTRACINGPIPELINE));
         features.add(new VulkanFeature(posFetchStruct, "rayTracingPositionFetch",
                 VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR.RAYTRACINGPOSITIONFETCH));
+
+        // Optional: opacity micromaps (any-hit opt). Only when the gate is on AND the device advertises the
+        // extension — its absence must not disable RT, so it is kept out of the mandatory feature set above.
+        ommEnabled = ENABLE_OMM && physicalDevice.hasDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+        if (ommEnabled) {
+            VulkanPNextStruct ommStruct = new VulkanPNextStruct(
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT,
+                    VkPhysicalDeviceOpacityMicromapFeaturesEXT.SIZEOF);
+            features.add(new VulkanFeature(ommStruct, "micromap",
+                    VkPhysicalDeviceOpacityMicromapFeaturesEXT.MICROMAP));
+        }
         args.set(2, features);
 
         rtRequested = true;
         UpscalerMod.LOGGER.info(
-                "Ray tracing: enabling {} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline] on [{}]",
-                RT_EXTENSIONS, physicalDevice.deviceName());
+                "Ray tracing: enabling {}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline"
+                        + (ommEnabled ? ", opacityMicromap" : "") + "] on [{}]",
+                RT_EXTENSIONS, ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "", physicalDevice.deviceName());
     }
 
     /**
@@ -176,6 +231,7 @@ public final class RtDeviceBringup {
     public static void probe(VkDevice device) {
         if (!rtRequested) {
             UpscalerMod.LOGGER.info("Ray tracing not requested; skipping RT probe");
+            maxOpacity4StateSubdivisionLevel = 0;
             return;
         }
         try {
@@ -195,6 +251,13 @@ public final class RtDeviceBringup {
                 VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps =
                         VkPhysicalDeviceRayTracingPipelinePropertiesKHR.calloc(stack).sType$Default();
                 rtProps.pNext(asProps.address());
+                // Chain the OMM properties only when the feature is enabled (else the driver would ignore an
+                // unrecognized struct, but keeping the chain clean matches the enabled feature set).
+                VkPhysicalDeviceOpacityMicromapPropertiesEXT ommProps = null;
+                if (ommEnabled) {
+                    ommProps = VkPhysicalDeviceOpacityMicromapPropertiesEXT.calloc(stack).sType$Default();
+                    asProps.pNext(ommProps.address());
+                }
                 VkPhysicalDeviceProperties2 props2 = VkPhysicalDeviceProperties2.calloc(stack).sType$Default();
                 props2.pNext(rtProps.address());
                 VK12.vkGetPhysicalDeviceProperties2(device.getPhysicalDevice(), props2);
@@ -204,6 +267,14 @@ public final class RtDeviceBringup {
                                 + "maxAS geometry/instance/primitive = {}/{}/{}",
                         rtProps.shaderGroupHandleSize(), rtProps.shaderGroupBaseAlignment(), rtProps.maxRayRecursionDepth(),
                         asProps.maxGeometryCount(), asProps.maxInstanceCount(), asProps.maxPrimitiveCount());
+                if (ommProps != null) {
+                    maxOpacity4StateSubdivisionLevel = ommProps.maxOpacity4StateSubdivisionLevel();
+                    UpscalerMod.LOGGER.info(
+                            "Opacity micromaps enabled — maxSubdivisionLevel 4-state={}, 2-state={}",
+                            ommProps.maxOpacity4StateSubdivisionLevel(), ommProps.maxOpacity2StateSubdivisionLevel());
+                } else {
+                    maxOpacity4StateSubdivisionLevel = 0;
+                }
             }
         } catch (Throwable t) {
             // A probe must never break device creation.

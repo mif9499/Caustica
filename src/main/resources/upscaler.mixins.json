@@ -15,6 +15,7 @@
 		"RenderTypeAccessor",
 		"TextureAtlasAccessor",
 		"ParticleGroupAccessor",
+		"SpriteContentsAccessor",
 		"VulkanBackendMixin",
 		"VulkanGpuTextureAccessor"
 	],
