@@ -1,7 +1,11 @@
 package dev.upscaler.rt;
 
+import com.mojang.blaze3d.pipeline.ColorTargetState;
+import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.QuadInstance;
+import dev.upscaler.mixin.RenderSetupAccessor;
+import dev.upscaler.mixin.RenderTypeAccessor;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.model.Model;
@@ -29,9 +33,12 @@ import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
+import net.minecraft.util.RandomSource;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.joml.Quaternionf;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -80,6 +87,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             capture.currentHasN = RtEntityTextures.INSTANCE.slotHasNormal(slot);
             capture.clearUvRemap();
         }
+        // Alpha-blended model layers (slime / sulfur-cube shells, ghosts, spectral overlays, …) get
+        // stochastic transparency in world.rahit so the inner content shows through; opaque/cutout mob
+        // surfaces keep the binary cutout. Block-entity sprite submissions (chests/signs) are opaque.
+        capture.currentTranslucent = sprite == null && isTranslucent(renderType);
         // Pose the model from its render state (idempotent re-pose; mirrors what the renderer does for
         // its feature layers), then render the posed parts into the capture. renderToBuffer applies the
         // PoseStack to every vertex/normal, so the capture receives world-/camera-relative geometry.
@@ -108,7 +119,26 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                 : 0;
         capture.currentHasS = false; // baked quads (items) are atlas-sourced — no per-type _n/_s
         capture.currentHasN = false;
+        capture.currentTranslucent = false; // block/item geometry is opaque (the inner content we want solid)
         capture.addBakedQuad(pose, q, tintColor(q.materialInfo().tintIndex(), tintLayers));
+    }
+
+    /** Whether a render type is alpha-blended (translucent) — its pipeline's color target has a blend
+     *  function. Cutout/solid have none. Drives stochastic entity transparency in world.rahit. */
+    private static boolean isTranslucent(RenderType renderType) {
+        if (renderType == null) {
+            return false;
+        }
+        try {
+            // RenderSetup is final, so the accessor cast goes through Object (the interface is mixed in at
+            // runtime), mirroring RtEntityTextures#textureLocation.
+            Object setup = ((RenderTypeAccessor) renderType).upscaler$state();
+            RenderPipeline pipeline = ((RenderSetupAccessor) setup).upscaler$pipeline();
+            ColorTargetState cts = pipeline.getColorTargetState();
+            return cts != null && cts.blendFunction().isPresent();
+        } catch (Throwable t) {
+            return false; // unknown → treat as opaque (the safe default: no behavior change)
+        }
     }
 
     /** Resolve a quad's tint colour from its tint index + the submission's tint layers (white if untinted). */
@@ -117,6 +147,41 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             return -1; // white
         }
         return tintLayers[tintIndex] | 0xFF000000; // force opaque; capture uses only the rgb
+    }
+
+    /**
+     * Re-mesh a contained block-model display (the sulfur cube's swallowed block, item-frame blocks, …)
+     * into the active capture. Driven by {@code BlockModelRenderStateMixin} during RT capture, because the
+     * display block-model set may wrap a block in a special renderer the normal submit path can't capture
+     * (it submitted zero quads). We mesh from the WORLD block-state model set instead — the same source
+     * falling blocks use, whose {@code SingleVariant} yields real parts — and push the quads through {@link
+     * #addQuads} (block-atlas textured, opaque). Tints default to white (biome tint is a follow-up).
+     */
+    public void captureBlockState(BlockState blockState, Matrix4fc transform, PoseStack poseStack) {
+        if (capture == null || blockState.isAir()) {
+            return;
+        }
+        BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(blockState);
+        if (model == null) {
+            return;
+        }
+        List<BlockStateModelPart> parts = new ArrayList<>();
+        model.collectParts(RandomSource.create(42L), parts);
+        if (parts.isEmpty()) {
+            return;
+        }
+        poseStack.pushPose();
+        if (transform != null) {
+            poseStack.mulPose(transform);
+        }
+        Matrix4f pose = poseStack.last().pose();
+        for (BlockStateModelPart part : parts) {
+            addQuads(pose, part.getQuads(null), null);
+            for (Direction d : DIRECTIONS) {
+                addQuads(pose, part.getQuads(d), null);
+            }
+        }
+        poseStack.popPose();
     }
 
     // --- Everything below is intentionally a no-op: not entity body geometry. ---
@@ -168,6 +233,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                 capture.currentTexSlot = slot;
                 capture.currentHasS = false; // block-atlas sourced — no per-type _n/_s
                 capture.currentHasN = false;
+                capture.currentTranslucent = false; // falling blocks are opaque
                 capture.addBakedQuad(pose, quad, -1); // white tint (falling blocks rarely biome-tinted)
             }
         };

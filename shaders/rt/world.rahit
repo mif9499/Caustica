@@ -61,6 +61,14 @@ layout(push_constant) uniform PushAddr { uint64_t worldPushAddr; } pcAddr;
 
 hitAttributeEXT vec2 attribs;
 
+// PCG hash RNG (matches world.rgen) — drives stochastic transparency for alpha-blended entity surfaces.
+uint pcg(inout uint s) {
+    s = s * 747796405u + 2891336453u;
+    uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+float rndf(inout uint s) { return float(pcg(s)) * (1.0 / 4294967296.0); }
+
 const float ALPHA_CUTOFF = 0.5;       // terrain (matches the cutout block models)
 const float ENTITY_ALPHA_CUTOFF = 0.1; // entities: only discard near-fully-transparent texels
 const int ENTITY_BIT = 0x800000;
@@ -79,8 +87,23 @@ void main() {
         uint i1 = indices.i[3u * pid + 1u];
         uint i2 = indices.i[3u * pid + 2u];
         vec2 uv = bary.x * uvs.uv[i0] + bary.y * uvs.uv[i1] + bary.z * uvs.uv[i2];
-        int texSlot = int(Prims(g.primAddr).p[pid].tint.w + 0.5);
-        if (texture(entityTex[nonuniformEXT(texSlot)], uv).a < ENTITY_ALPHA_CUTOFF) {
+        Prim epr = Prims(g.primAddr).p[pid];
+        int texSlot = int(epr.tint.w + 0.5);
+        float ealpha = texture(entityTex[nonuniformEXT(texSlot)], uv).a;
+        // normal.w flags an alpha-blended (translucent) surface — slime / sulfur-cube shells, ghosts, …
+        // (set by RtEntityCapture; 0 for opaque/cutout mobs + particles, which keep the binary cutout).
+        if (epr.normal.w > 0.5) {
+            // Stochastic transparency: keep the hit with probability = texel alpha; DLSS-RR resolves the
+            // per-pixel noise into a smooth see-through shell, so the inner content (slime core, the sulfur
+            // cube's contained block) shows through. Seed by pixel + frame + primitive + hit distance so
+            // each surface along a ray — and primary vs shadow/GI rays — decorrelate.
+            uint seed = (uint(gl_LaunchIDEXT.x) * 1973u + uint(gl_LaunchIDEXT.y) * 9277u
+                         + uint(pid) * 26699u) ^ (pc.frameIndex * 2654435761u)
+                         ^ (floatBitsToUint(gl_HitTEXT) * 668265263u);
+            if (rndf(seed) >= ealpha) {
+                ignoreIntersectionEXT;
+            }
+        } else if (ealpha < ENTITY_ALPHA_CUTOFF) {
             ignoreIntersectionEXT;
         }
         return;

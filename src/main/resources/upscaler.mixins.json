@@ -4,6 +4,8 @@
 	"package": "dev.upscaler.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"client": [
+		"BlockModelRenderStateMixin",
+		"BlockModelResolverMixin",
 		"CommandEncoderAccessor",
 		"GameRendererMixin",
 		"GpuDeviceAccessor",

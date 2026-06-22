@@ -33,6 +33,12 @@ public final class RtEntityCapture implements VertexConsumer {
     // Set by the collector per submission; mobs (per-type textures) may have them, atlas-sourced quads don't.
     boolean currentHasS;
     boolean currentHasN;
+    // Whether the current submission is an alpha-blended (translucent) render type — slime / sulfur-cube
+    // shells, ghosts, … Stored per-prim in the otherwise-unused entity emission lane (normal.w); world.rahit
+    // reads it and does stochastic transparency for those surfaces instead of a binary cutout, so the inner
+    // content (slime core, the sulfur cube's contained block) shows through the shell. Set by the collector
+    // per submission (model bodies only — block/item/particle paths force it false).
+    boolean currentTranslucent;
     // P5.1b-2f: when a model textures from an atlas SPRITE (block entities: chests/signs/beds via a
     // Material), its ModelPart UVs are 0..1 in a virtual texture and must be remapped into the sprite's
     // atlas region — the work vanilla's sprite-coordinate-expander VertexConsumer does, which we bypass.
@@ -57,6 +63,7 @@ public final class RtEntityCapture implements VertexConsumer {
         currentTexSlot = 0;
         currentHasS = false;
         currentHasN = false;
+        currentTranslucent = false;
         uvRemap = false;
     }
 
@@ -162,7 +169,9 @@ public final class RtEntityCapture implements VertexConsumer {
             prim.add(nx);
             prim.add(ny);
             prim.add(nz);
-            prim.add(0f); // emission (entities don't carry block light)
+            // normal.w: entities don't carry block-light emission, so this lane flags an alpha-blended
+            // (translucent) surface → world.rahit does stochastic transparency instead of a binary cutout.
+            prim.add(currentTranslucent ? 1f : 0f);
             prim.add(tr);
             prim.add(tg);
             prim.add(tb);
