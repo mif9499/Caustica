@@ -11,6 +11,7 @@ import dev.upscaler.client.SodiumCompat;
 import dev.upscaler.client.UpscalerJitter;
 import dev.upscaler.mixin.CommandEncoderAccessor;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.BiomeColors;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
@@ -556,8 +557,32 @@ public final class RtComposite {
             if (Boolean.parseBoolean(System.getProperty("upscaler.rt.sss", "true"))) {
                 flags |= 0b1000; // LabPBR SSS translucency
             }
+            if (Boolean.parseBoolean(System.getProperty("upscaler.rt.waterWaves", "true"))) {
+                flags |= 0b10000; // W1: animated water wave normals
+            }
             push.putInt(192, flags);
             writeSky(push);
+
+            // W1/W2 water params @320 (sunUv@288 / moonUv@304 belong to the sky push above): xyz = the
+            // camera biome's water tint (drives absorption when the eye starts submerged, before any water
+            // surface is hit); w = wave animation time (seconds, wrapped to keep float precision). Per-
+            // water-body tint comes from the prim; this is only the fallback.
+            float wtr = 0.25f, wtg = 0.46f, wtb = 0.9f; // neutral ocean-ish default if no level/biome
+            if (level != null) {
+                int wc = BiomeColors.getAverageWaterColor(level, cameraBlockPos);
+                wtr = ((wc >> 16) & 0xFF) / 255f;
+                wtg = ((wc >> 8) & 0xFF) / 255f;
+                wtb = (wc & 0xFF) / 255f;
+            }
+            push.putFloat(320, wtr);
+            push.putFloat(324, wtg);
+            push.putFloat(328, wtb);
+            push.putFloat(332, (float) (System.nanoTime() / 1.0e9 % 3600.0));
+            // W1 wave-domain anchor @336: the terrain rebase origin reduced mod 4096 (kept small for shader
+            // float precision). hitPos.xz (rebased) + anchor reconstructs a world-pinned coordinate, so the
+            // ripple pattern stays fixed in the world as the player moves and the rebase origin shifts.
+            push.putFloat(336, terrain.blockX & WATER_ANCHOR_MASK);
+            push.putFloat(340, terrain.blockZ & WATER_ANCHOR_MASK);
 
             // Rebuild the TLAS this frame from static section instances merged with dynamic entity
             // instances, bind it into the pipeline's descriptor ring, record the build, then barrier so

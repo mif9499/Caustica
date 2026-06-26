@@ -335,7 +335,10 @@ void main() {
                 textureLod(blockNormalAtlas, uv, 0.0), ao);
     }
 
-    payload.albedo = textureLod(blockAtlas, uv, 0.0).rgb * tint * ao;
+    // Water (tint.w == 1) carries the pure biome water tint (no grey water-texture multiply): raygen
+    // shades the surface as a clear dielectric and only needs the tint to derive the per-channel
+    // Beer–Lambert absorption. Opaque terrain uses the textured albedo as before.
+    payload.albedo = (pr.tint.w > 0.5) ? tint : textureLod(blockAtlas, uv, 0.0).rgb * tint * ao;
     payload.normal = n;
     payload.hitT = gl_HitTEXT;
     payload.motionPrev = vec3(0.0); // static terrain: camera-only motion vector

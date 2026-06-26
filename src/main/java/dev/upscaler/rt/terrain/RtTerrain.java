@@ -1246,6 +1246,7 @@ public final class RtTerrain {
         boolean water;       // set per fluid block: true for water (dielectric), false for lava
         private int n;
         private final float[] qx = new float[4], qy = new float[4], qz = new float[4], qu = new float[4], qv = new float[4];
+        private final int[] qc = new int[4]; // per-vertex packed ARGB (vanilla bakes the biome water tint here)
 
         @Override
         public VertexConsumer getBuilder(ChunkSectionLayer layer) {
@@ -1255,7 +1256,7 @@ public final class RtTerrain {
         @Override
         public void addVertex(float x, float y, float z, int color, float u, float v,
                               int overlay, int light, float nx, float ny, float nz) {
-            qx[n] = x; qy[n] = y; qz[n] = z; qu[n] = u; qv[n] = v;
+            qx[n] = x; qy[n] = y; qz[n] = z; qu[n] = u; qv[n] = v; qc[n] = color;
             if (++n == 4) {
                 emitQuad();
                 n = 0;
@@ -1299,15 +1300,31 @@ public final class RtTerrain {
             float material = water ? 1f : 0f; // tint.w: 1 = water dielectric, 0 = opaque (lava)
             // Water is a near-smooth dielectric; lava is a moderately rough opaque emitter.
             float rough = water ? RtMaterials.WATER_ROUGH : RtMaterials.LAVA_ROUGH;
+            // Biome water tint: vanilla's FluidRenderer bakes BiomeColors.getAverageWaterColor into the
+            // per-vertex colour, so the average of the quad's four colours is this water body's tint. The
+            // path tracer turns it into a per-channel Beer–Lambert extinction (ocean blue vs swamp green).
+            // Lava keeps a white tint (its colour rides the emission channel, not absorption).
+            float tr = 1f, tg = 1f, tb = 1f;
+            if (water) {
+                int sr = 0, sg = 0, sb = 0;
+                for (int i = 0; i < 4; i++) {
+                    sr += (qc[i] >> 16) & 0xFF;
+                    sg += (qc[i] >> 8) & 0xFF;
+                    sb += qc[i] & 0xFF;
+                }
+                tr = sr / 1020f; // 4 vertices * 255
+                tg = sg / 1020f;
+                tb = sb / 1020f;
+            }
             FloatArrayList prim = g.prim;
             for (int t = 0; t < 2; t++) { // one {normal+emission, tint, mat} record per triangle
                 prim.add(nx);
                 prim.add(ny);
                 prim.add(nz);
                 prim.add(emission);
-                prim.add(1f);
-                prim.add(1f);
-                prim.add(1f);
+                prim.add(tr);
+                prim.add(tg);
+                prim.add(tb);
                 prim.add(material);
                 prim.add(rough);
                 prim.add(0f); // metalness (fluids are dielectric)
