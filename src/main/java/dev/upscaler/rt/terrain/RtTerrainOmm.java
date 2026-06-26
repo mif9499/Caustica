@@ -127,7 +127,8 @@ final class RtTerrainOmm {
         if (classifiedMicroTriangles == 0) {
             return null;
         }
-        return new RtAccel.OpacityMicromapInput(data, triCount, level, bytesPerTriangle);
+        byte[] triangles = RtAccel.opacityMicromapTriangles(triCount, level, bytesPerTriangle);
+        return new RtAccel.OpacityMicromapInput(data, triangles, triCount, level, bytesPerTriangle);
     }
 
     private static void recordOmmStatsDisabled() {
