@@ -65,7 +65,7 @@ public final class UpscalerConfig {
         Object[] touch = {
             Rt.ENABLED, Rt.Composite.ENABLED, Rt.Terrain.ASYNC_DISPATCH_PER_TICK, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED,
-            Rt.Exposure.MODE, Rt.BufferPool.STATS, Rt.Hdr.MODE, Ngx.PATH,
+            Rt.Exposure.MODE, Rt.BufferPool.STATS, Rt.FrameStats.ENABLED, Rt.Hdr.MODE, Ngx.PATH,
         };
     }
 
@@ -620,6 +620,14 @@ public final class UpscalerConfig {
             public static final BooleanSetting STATS = bool("upscaler.rt.poolStats", false);
 
             private BufferPool() {
+            }
+        }
+
+        /** Per-stage terrain-tick/composite-frame timing + hitch logging. See {@code RtFrameStats}. */
+        public static final class FrameStats {
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.frameStats", false);
+
+            private FrameStats() {
             }
         }
 

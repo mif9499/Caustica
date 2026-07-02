@@ -9,6 +9,7 @@ import dev.upscaler.rt.RtComposite;
 import dev.upscaler.rt.RtContext;
 import dev.upscaler.rt.RtDebugLabels;
 import dev.upscaler.rt.RtDeviceBringup;
+import dev.upscaler.rt.RtFrameStats;
 import dev.upscaler.rt.accel.RtAccel;
 import dev.upscaler.rt.accel.RtBuffer;
 import dev.upscaler.rt.accel.RtBufferPool;
@@ -340,6 +341,7 @@ public final class RtTerrain {
             }
         }
 
+        RtFrameStats.TERRAIN.begin();
         int pbx = mc.player.getBlockX();
         int pby = mc.player.getBlockY();
         int pbz = mc.player.getBlockZ();
@@ -357,7 +359,9 @@ public final class RtTerrain {
         prepared.clear();
 
         boolean movedWindow = windowValid && (windowPcx != pcx || windowPcz != pcz);
-        syncDesiredWindow(chunkSource, pcx, psy, pcz, r, loY, hiY, removed);
+        try (RtFrameStats.Scope ignored = RtFrameStats.TERRAIN.stage("windowSync")) {
+            syncDesiredWindow(chunkSource, pcx, psy, pcz, r, loY, hiY, removed);
+        }
 
         // Re-extract edited sections. Drain under a short lock so concurrent block updates are not lost.
         drainDirty();
@@ -374,33 +378,41 @@ public final class RtTerrain {
         }
 
         // Tessellate + upload new sections (BLAS build deferred to rebuild's single batched submission).
-        DispatchContext dispatch = null;
-        int dispatchCap = movedWindow ? asyncDispatchMovingPerTick() : asyncDispatchPerTick();
+        try (RtFrameStats.Scope ignored = RtFrameStats.TERRAIN.stage("snapshotDispatch")) {
+            DispatchContext dispatch = null;
+            int dispatchCap = movedWindow ? asyncDispatchMovingPerTick() : asyncDispatchPerTick();
+            int dispatchSlots = Math.min(dispatchCap, Math.max(0, maxInflight() - inFlight.size()));
+            if (dispatchSlots > 0 && !playerReextract.isEmpty()) {
+                dispatch = dispatchContext(level);
+                dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots,
+                        playerReextract, queuedPlayerReextract, PRIORITY_PLAYER);
+            }
+            if (dispatchSlots > 0 && !reextract.isEmpty()) {
+                if (dispatch == null) {
+                    dispatch = dispatchContext(level);
+                }
+                dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots,
+                        reextract, queuedReextract, PRIORITY_DIRTY);
+            }
+            if (dispatchSlots > 0 && !missing.isEmpty()) {
+                if (dispatch == null) {
+                    dispatch = dispatchContext(level);
+                }
+                dispatchTessellation(dispatch, chunkSource, dispatchSlots);
+            }
+        }
+
         int resultCap = movedWindow ? sectionResultsMovingPerTick() : sectionResultsPerTick();
-        int dispatchSlots = Math.min(dispatchCap, Math.max(0, maxInflight() - inFlight.size()));
-        if (dispatchSlots > 0 && !playerReextract.isEmpty()) {
-            dispatch = dispatchContext(level);
-            dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots,
-                    playerReextract, queuedPlayerReextract, PRIORITY_PLAYER);
+        try (RtFrameStats.Scope ignored = RtFrameStats.TERRAIN.stage("drainUpload")) {
+            drainTessellation(ctx, prepared, removed, resultCap);
         }
-        if (dispatchSlots > 0 && !reextract.isEmpty()) {
-            if (dispatch == null) {
-                dispatch = dispatchContext(level);
-            }
-            dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots,
-                    reextract, queuedReextract, PRIORITY_DIRTY);
-        }
-        if (dispatchSlots > 0 && !missing.isEmpty()) {
-            if (dispatch == null) {
-                dispatch = dispatchContext(level);
-            }
-            dispatchTessellation(dispatch, chunkSource, dispatchSlots);
-        }
-        drainTessellation(ctx, prepared, removed, resultCap);
 
         if (!removed.isEmpty() || !prepared.isEmpty()) {
-            startBuild(ctx, prepared, removed, pbx, pby, pbz);
+            try (RtFrameStats.Scope ignored = RtFrameStats.TERRAIN.stage("startBuild")) {
+                startBuild(ctx, prepared, removed, pbx, pby, pbz);
+            }
         }
+        RtFrameStats.TERRAIN.end();
     }
 
     private void syncDesiredWindow(ClientChunkCache chunkSource, int pcx, int psy, int pcz,
@@ -893,6 +905,7 @@ public final class RtTerrain {
      */
     private PreparedSection uploadSection(RtContext ctx, PackedSection packed, RtAccel.OpacityMicromapInput ommInput,
                                           long key, int sox, int soy, int soz) {
+        RtFrameStats.TERRAIN.count("sectionsUploaded", 1);
         int vertCount = packed.positions().length / 3;
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -1029,6 +1042,7 @@ public final class RtTerrain {
 
     /** Snapshot one section on the render thread and submit its tessellation to the worker pool. */
     private void dispatchSection(DispatchContext dispatch, long key, int sx, int sy, int sz, int priority) {
+        RtFrameStats.TERRAIN.count("sectionsSnapshotted", 1);
         RenderSectionRegion region = dispatch.regionCache().createRegion(dispatch.level(), SectionPos.asLong(sx, sy, sz));
         long token = ++tessToken;
         long dirtyGroup = queuedDirtyGroup.remove(key);

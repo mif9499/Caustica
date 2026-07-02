@@ -29,9 +29,19 @@ public final class RtBufferPool {
     private record PoolKey(int usage, boolean hostVisible, long bucket) {}
 
     private final Map<PoolKey, ArrayDeque<RtBuffer>> free = new HashMap<>();
+    private final Runnable onCreate;
     private long created;
     private long reused;
     private long statsCounter;
+
+    public RtBufferPool() {
+        this(null);
+    }
+
+    /** {@code onCreate}, if given, fires once per fresh (non-reused) VMA allocation — for {@code RtFrameStats}. */
+    public RtBufferPool(Runnable onCreate) {
+        this.onCreate = onCreate;
+    }
 
     /** Acquire a buffer with capacity ≥ {@code minSize}, reusing a free one if available. */
     public RtBuffer acquire(RtContext ctx, long minSize, int usage, boolean hostVisible) {
@@ -47,6 +57,9 @@ public final class RtBufferPool {
             return list.pop();
         }
         created++;
+        if (onCreate != null) {
+            onCreate.run();
+        }
         return ctx.createBuffer(bucket, usage, hostVisible, label + " bucket " + bucket + "B");
     }
 

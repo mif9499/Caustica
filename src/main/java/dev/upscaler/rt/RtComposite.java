@@ -655,6 +655,7 @@ public final class RtComposite {
     }
 
     private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {
+        RtFrameStats.COMPOSITE.begin();
         long dstImage = vkImage(nativeColor);
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).upscaler$getBackend();
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
@@ -752,10 +753,15 @@ public final class RtComposite {
             // terrain BLAS), then the trace — each separated by a barrier. The frame TLAS is retired
             // KEEP_FRAMES later (entity meshes/BLAS are retired by RtEntities on the same horizon).
             if (!fe.blas().isEmpty()) {
-                RtAccel.recordBlasBuilds(ctx, cmd, fe.blas());
+                try (RtFrameStats.Scope ignored = RtFrameStats.COMPOSITE.stage("blasRecord")) {
+                    RtAccel.recordBlasBuilds(ctx, cmd, fe.blas());
+                }
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // entity BLAS writes visible to the TLAS build
             }
-            RtAccel.PreparedTlas frameTlas = RtAccel.prepareTlas(ctx, fe.instances());
+            RtAccel.PreparedTlas frameTlas;
+            try (RtFrameStats.Scope ignored = RtFrameStats.COMPOSITE.stage("prepareTlas")) {
+                frameTlas = RtAccel.prepareTlas(ctx, fe.instances());
+            }
             active.setTlas(frameTlas.accel.handle);
             RtAccel.recordTlasBuild(ctx, cmd, frameTlas);
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
@@ -763,7 +769,8 @@ public final class RtComposite {
 
             // Push only the 8-byte device address of this frame's filled push-data slot.
             ByteBuffer pushAddr = stack.malloc(Long.BYTES).putLong(0, pushBuf.deviceAddress);
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world trace")) {
+            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world trace");
+                 RtFrameStats.Scope ignoredStats = RtFrameStats.COMPOSITE.stage("traceRecord")) {
                 active.trace(cmd, renderW, renderH, pushAddr);
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT color visible to exposure histogram/fixed write
@@ -812,6 +819,7 @@ public final class RtComposite {
             throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");
         }
         encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+        RtFrameStats.COMPOSITE.end();
     }
 
     /**
