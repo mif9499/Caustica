@@ -673,7 +673,7 @@ public final class RtAccel {
         }
     }
 
-    /** A TLAS whose AS + backing + instance buffer are allocated but whose build is recorded later. */
+    /** A build-ready TLAS view over a {@link TlasRing} slot's resources (the ring owns and frees them). */
     public static final class PreparedTlas {
         public final RtAccel accel;
         private final RtBuffer instanceBuffer;
@@ -688,27 +688,67 @@ public final class RtAccel {
             this.instanceCount = instanceCount;
             this.label = label;
         }
+    }
 
-        /**
-         * Free the TLAS, its instance buffer, and its scratch. For a per-frame TLAS the whole bundle
-         * is retired together once the frame that traced it is no longer in flight (the instance +
-         * scratch buffers are still read by the recorded build, and the AS by the recorded trace).
-         */
-        public void destroyAll() {
-            accel.destroy();
-            instanceBuffer.destroy();
-            scratch.destroy();
+    /**
+     * Reusable per-frame TLAS resources. Allocating the instance buffer + AS backing + scratch fresh every
+     * frame (and defer-destroying them 4 frames later) occasionally hit VMA's slow path — a fresh
+     * VkDeviceMemory block allocation + map — observed as rare 20–50ms prepareTlas spikes. The ring keeps
+     * {@value #RING} slots, each sized for a capacity instance count, and rebuilds the same AS in place: a
+     * slot is reused every {@value #RING} frames (the established frames-in-flight horizon), so its
+     * previous build/trace is off all queues before the instance buffer is rewritten. A slot is recreated
+     * only when the instance count outgrows its capacity.
+     */
+    public static final class TlasRing {
+        private static final int RING = 4;           // = the frames-in-flight KEEP_FRAMES horizon
+        private static final float GROWTH = 1.25f;   // capacity headroom on (re)size
+        private static final int MIN_CAPACITY = 1024;
+        private final Slot[] slots = new Slot[RING];
+        private int cursor;
+
+        private static final class Slot {
+            RtAccel accel;
+            RtBuffer instanceBuffer;
+            RtBuffer scratch;
+            int capacity;
+
+            void destroy() {
+                accel.destroy();
+                instanceBuffer.destroy();
+                scratch.destroy();
+            }
+        }
+
+        /** Free all slots. Teardown-only — the caller guarantees the device is idle. */
+        public void destroy() {
+            for (int i = 0; i < slots.length; i++) {
+                if (slots[i] != null) {
+                    slots[i].destroy();
+                    slots[i] = null;
+                }
+            }
         }
     }
 
-    /** Allocate a TLAS (AS + backing + filled instance buffer + scratch), deferring the build. */
-    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> instances) {
-        VkDevice vk = ctx.vk();
+    /**
+     * Fill the next ring slot's instance buffer and return it as a build-ready TLAS (the slot's AS is
+     * rebuilt in place — BUILD mode overwrites). Do NOT call {@link PreparedTlas#destroyAll} on the
+     * result: the ring owns the resources.
+     */
+    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> instances, TlasRing ring) {
         int count = instances.size();
-        String label = "frame TLAS " + count + " instances";
-        RtBuffer instanceBuffer = ctx.createBuffer((long) VkAccelerationStructureInstanceKHR.SIZEOF * count,
-                org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, true,
-                label + " instance buffer");
+        TlasRing.Slot slot = ring.slots[ring.cursor];
+        if (slot == null || count > slot.capacity) {
+            // Outgrown (or first use). The slot's previous use is RING frames behind — off all queues by
+            // the same convention the old per-frame deferred free relied on — so immediate destroy is safe.
+            if (slot != null) {
+                slot.destroy();
+            }
+            slot = createTlasSlot(ctx, Math.max(TlasRing.MIN_CAPACITY, (int) (count * TlasRing.GROWTH)));
+            ring.slots[ring.cursor] = slot;
+        }
+        ring.cursor = (ring.cursor + 1) % TlasRing.RING;
+
         try (MemoryStack stack = MemoryStack.stackPush()) {
             // Reuse a single record + transform buffer across all instances: allocating per-instance
             // on the MemoryStack (64 KB/thread) overflows it once there are hundreds of sections.
@@ -722,14 +762,30 @@ public final class RtAccel {
                 rec.instanceCustomIndex(inst.customIndex()).mask(inst.mask()).instanceShaderBindingTableRecordOffset(inst.sbtRecordOffset())
                         .flags(0x00000001) // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
                         .accelerationStructureReference(inst.blasDeviceAddress());
-                MemoryUtil.memCopy(rec.address(), instanceBuffer.mapped + (long) i * VkAccelerationStructureInstanceKHR.SIZEOF,
+                MemoryUtil.memCopy(rec.address(), slot.instanceBuffer.mapped + (long) i * VkAccelerationStructureInstanceKHR.SIZEOF,
                         VkAccelerationStructureInstanceKHR.SIZEOF);
             }
+        }
+        return new PreparedTlas(slot.accel, slot.instanceBuffer, slot.scratch, count,
+                "frame TLAS " + count + " instances");
+    }
 
-            VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = tlasBuildInfo(stack, instanceBuffer.deviceAddress);
+    /** Create one ring slot sized for {@code capacity} instances (instance buffer + AS + backing + scratch). */
+    private static TlasRing.Slot createTlasSlot(RtContext ctx, int capacity) {
+        VkDevice vk = ctx.vk();
+        String label = "TLAS ring slot (" + capacity + " instance capacity)";
+        TlasRing.Slot slot = new TlasRing.Slot();
+        slot.capacity = capacity;
+        slot.instanceBuffer = ctx.createBuffer((long) VkAccelerationStructureInstanceKHR.SIZEOF * capacity,
+                org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, true,
+                label + " instance buffer");
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            // Size the AS + scratch for the slot CAPACITY: build sizes are monotonic in instance count, so
+            // every per-frame build with count ≤ capacity fits the same backing/scratch.
+            VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = tlasBuildInfo(stack, slot.instanceBuffer.deviceAddress);
             VkAccelerationStructureBuildSizesInfoKHR sizes = VkAccelerationStructureBuildSizesInfoKHR.calloc(stack).sType$Default();
             vkGetAccelerationStructureBuildSizesKHR(vk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                    build.get(0), stack.ints(count), sizes);
+                    build.get(0), stack.ints(capacity), sizes);
 
             RtBuffer backing = ctx.createBuffer(sizes.accelerationStructureSize(), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false,
                     label + " backing");
@@ -739,13 +795,14 @@ public final class RtAccel {
             RtContext.check(vkCreateAccelerationStructureKHR(vk, ci, null, pAs), "vkCreateAccelerationStructureKHR");
             long handle = pAs.get(0);
             RtDebugLabels.nameAccelerationStructure(ctx, handle, label);
-            RtBuffer scratch = ctx.createBuffer(sizes.buildScratchSize(), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
+            slot.scratch = ctx.createBuffer(sizes.buildScratchSize(), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
                     label + " build scratch");
             VkAccelerationStructureDeviceAddressInfoKHR addrInfo = VkAccelerationStructureDeviceAddressInfoKHR.calloc(stack)
                     .sType$Default().accelerationStructure(handle);
             long deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(vk, addrInfo);
-            return new PreparedTlas(new RtAccel(vk, handle, deviceAddress, backing), instanceBuffer, scratch, count, label);
+            slot.accel = new RtAccel(vk, handle, deviceAddress, backing);
         }
+        return slot;
     }
 
     private static VkAccelerationStructureBuildGeometryInfoKHR.Buffer tlasBuildInfo(MemoryStack stack, long instanceBufferAddr) {

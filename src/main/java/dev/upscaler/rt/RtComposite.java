@@ -273,13 +273,10 @@ public final class RtComposite {
     private float moonU1 = 1f;
     private float moonV1 = 1f;
 
-    // Per-frame TLASes awaiting a frames-in-flight-safe free (the build + trace that used them must
-    // finish first). Each is retired at the composite frame counter it was built on + KEEP_FRAMES.
-    private final List<DeferredTlas> deferredTlas = new ArrayList<>();
-
-    /** A per-frame TLAS retired for a frames-in-flight-safe free once {@code freeFrame} is reached. */
-    private record DeferredTlas(long freeFrame, RtAccel.PreparedTlas tlas) {
-    }
+    // Per-frame TLAS resources, rebuilt in place from a small ring of persistent slots (see
+    // RtAccel.TlasRing — replaces the old create-and-defer-destroy-per-frame churn whose VMA slow path
+    // showed up as rare multi-ms prepareTlas spikes).
+    private final RtAccel.TlasRing tlasRing = new RtAccel.TlasRing();
 
     private RtComposite() {
     }
@@ -342,7 +339,6 @@ public final class RtComposite {
         if (ctx == null) {
             return false;
         }
-        processDeferredTlasFrees(); // free per-frame TLASes now safely past their frames-in-flight window
         // Budgeted terrain streaming (dispatch/drain/build kick) runs here, once per render frame — before
         // the ready gate below, because it is what MAKES terrain ready during the initial fill.
         try {
@@ -781,12 +777,11 @@ public final class RtComposite {
             }
             RtAccel.PreparedTlas frameTlas;
             try (RtFrameStats.Scope ignored = RtFrameStats.COMPOSITE.stage("prepareTlas")) {
-                frameTlas = RtAccel.prepareTlas(ctx, fe.instances());
+                frameTlas = RtAccel.prepareTlas(ctx, fe.instances(), tlasRing);
             }
             active.setTlas(frameTlas.accel.handle);
             RtAccel.recordTlasBuild(ctx, cmd, frameTlas);
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
-            deferredTlas.add(new DeferredTlas(frameCounter + KEEP_FRAMES, frameTlas));
 
             // Push only the 8-byte device address of this frame's filled push-data slot.
             ByteBuffer pushAddr = stack.malloc(Long.BYTES).putLong(0, pushBuf.deviceAddress);
@@ -959,28 +954,10 @@ public final class RtComposite {
         return t * t * (3f - 2f * t);
     }
 
-    /** Free per-frame TLASes whose tracing frame is now far enough behind to be off all in-flight queues. */
-    private void processDeferredTlasFrees() {
-        if (deferredTlas.isEmpty()) {
-            return;
-        }
-        Iterator<DeferredTlas> it = deferredTlas.iterator();
-        while (it.hasNext()) {
-            DeferredTlas d = it.next();
-            if (d.freeFrame() <= frameCounter) {
-                d.tlas().destroyAll();
-                it.remove();
-            }
-        }
-    }
-
     public void destroy() {
-        // Teardown runs after the device is idle (CLIENT_STOPPING waits), so any outstanding per-frame
-        // TLASes are no longer in flight and can be freed immediately.
-        for (DeferredTlas d : deferredTlas) {
-            d.tlas().destroyAll();
-        }
-        deferredTlas.clear();
+        // Teardown runs after the device is idle (CLIENT_STOPPING waits), so the TLAS ring's slots are no
+        // longer in flight and can be freed immediately.
+        tlasRing.destroy();
         if (RtDlssRr.enabled()) {
             RtDlssRr.INSTANCE.destroy();
         }
