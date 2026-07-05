@@ -24,6 +24,14 @@
 	"upscaler.options.rt.waterWaves": "Animated Water",
 	"upscaler.options.rt.waterWaves.tooltip": "Animate water-surface normals for moving wave highlights.",
 
+	"upscaler.options.rt.dlssQuality": "DLSS Quality",
+	"upscaler.options.rt.dlssQuality.tooltip": "DLSS Ray Reconstruction quality mode. Lower-quality modes render fewer pixels and upscale more aggressively for higher framerates; higher-quality modes render more pixels for a sharper image. Only affects the image when DLSS Ray Reconstruction is enabled.",
+	"upscaler.options.rt.dlssQuality.3": "Ultra Performance",
+	"upscaler.options.rt.dlssQuality.0": "Performance",
+	"upscaler.options.rt.dlssQuality.1": "Balanced",
+	"upscaler.options.rt.dlssQuality.2": "Quality",
+	"upscaler.options.rt.dlssQuality.5": "DLAA",
+
 	"upscaler.options.rt.debugView": "Debug View",
 	"upscaler.options.rt.debugView.tooltip": "Visualize an intermediate ray-tracing buffer instead of the final image.",
 	"upscaler.options.rt.debugView.0": "Off",

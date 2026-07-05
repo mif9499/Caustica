@@ -1,13 +1,11 @@
 package dev.upscaler;
 
-import java.io.IOException;
-import java.nio.file.Files;
+import com.electronwill.nightconfig.core.CommentedConfig;
+import com.electronwill.nightconfig.core.file.CommentedFileConfig;
+import com.electronwill.nightconfig.core.file.FileNotFoundAction;
+import com.electronwill.nightconfig.toml.TomlFormat;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.DoubleUnaryOperator;
 import java.util.function.IntUnaryOperator;
@@ -22,21 +20,16 @@ import org.slf4j.LoggerFactory;
  * default. The settings UI and any other code call the same {@code set(...)} methods, and {@link #save()}
  * writes the current values back to the TOML file.
  *
- * <p>The TOML file uses quoted, fully-qualified keys at the top level (e.g.
- * {@code "upscaler.rt.composite" = true}). Quoting sidesteps the dotted-key/table ambiguity that would
- * otherwise collide {@code upscaler.rt} (a boolean) with the {@code upscaler.rt.*} family.
+ * <p>The system property namespace ({@code upscaler.rt.foo}) and the TOML layout are independent: the file
+ * uses real nested tables (e.g. {@code [omm]} with a {@code subdivision} key) grouped for readability, while
+ * the property namespace stays flat and dotted for convenient one-off {@code -D} overrides.
  */
 public final class UpscalerConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("upscaler-config");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
 
-    /** External values parsed from the TOML file, keyed by full setting key. Loaded once at class init. */
-    private static final Map<String, String> FILE_VALUES = new HashMap<>();
     private static final Path CONFIG_PATH = resolveConfigPath();
-
-    static {
-        loadFileValues(CONFIG_PATH);
-    }
+    private static final CommentedFileConfig FILE = loadFile(CONFIG_PATH);
 
     private UpscalerConfig() {
     }
@@ -64,15 +57,16 @@ public final class UpscalerConfig {
         @SuppressWarnings("unused")
         Object[] touch = {
             Rt.ENABLED, Rt.Composite.ENABLED, Rt.Terrain.ASYNC_DISPATCH_PER_TICK, Rt.Omm.ENABLED,
-            Rt.Entities.ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED,
-            Rt.Exposure.MODE, Rt.BufferPool.STATS, Rt.FrameStats.ENABLED, Rt.Hdr.MODE, Ngx.PATH,
+            Rt.Entities.ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
+            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.BufferPool.STATS, Rt.FrameStats.ENABLED,
+            Rt.Hdr.MODE, Ngx.PATH,
         };
     }
 
     /** Writes the default config file if it does not exist yet. */
     public static void saveIfMissing() {
         ensureRegistered();
-        if (!Files.isRegularFile(CONFIG_PATH)) {
+        if (FILE.valueMap().isEmpty()) {
             save();
         }
     }
@@ -80,30 +74,39 @@ public final class UpscalerConfig {
     /** Serializes all registered settings to the TOML config file. */
     public static synchronized void save() {
         ensureRegistered();
-        List<RuntimeSetting<?>> sorted = new ArrayList<>(SETTINGS);
-        sorted.sort(Comparator.comparing(RuntimeSetting::key));
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("# Upscaler RT renderer configuration.\n");
-        sb.append("# Generated automatically; edit while the game is closed.\n");
-        sb.append("# Precedence: a matching -Dupscaler.* system property overrides this file.\n\n");
-        for (RuntimeSetting<?> setting : sorted) {
-            String value = setting.tomlValue();
-            if (value == null) {
-                continue;
-            }
-            sb.append('"').append(setting.key()).append("\" = ").append(value).append('\n');
+        writeComments();
+        for (RuntimeSetting<?> setting : SETTINGS) {
+            setting.writeToFile(FILE);
         }
+        FILE.save();
+    }
 
-        try {
-            Path parent = CONFIG_PATH.getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
-            Files.writeString(CONFIG_PATH, sb.toString());
-        } catch (IOException e) {
-            LOGGER.warn("Failed to write Upscaler config {}: {}", CONFIG_PATH, e.toString());
-        }
+    private static void writeComments() {
+        FILE.setComment("enabled",
+                " Upscaler RT renderer configuration.\n"
+                        + " A matching -Dupscaler.* system property overrides the value below.");
+        FILE.setComment("terrain",
+                " Wall-clock budget for one streaming pass (snapshot dispatch + upload drain). The per-frame\n"
+                        + " slice scales with queue pressure from stream-budget-ms (near-idle) up to\n"
+                        + " stream-budget-max-ms (big backlog: initial fill, F3+A, teleport, fast flight) so fill\n"
+                        + " throughput recovers when it matters and the cost drops back once the queue clears.\n"
+                        + " stream-fallback-budget-ms is the per-tick slice used only when no world frame is\n"
+                        + " streaming (loading screens), where a long pass hitches nothing.");
+        FILE.setComment("entities.rigid-reuse",
+                " Reuse an entity's previous mesh buffers + BLAS when this frame's pose is a rigid transform\n"
+                        + " (translation and/or yaw) of the cached one.");
+        FILE.setComment("frame-generation",
+                " DLSS Frame Generation. Default off; gated additionally by hardware/driver availability.\n"
+                        + " multi-frame-count: frames generated per rendered frame (1 = 2x, 2 = 3x, ...), clamped\n"
+                        + " at runtime to the driver's reported DLSSG.MultiFrameCountMax.");
+        FILE.setComment("reflex",
+                " NVIDIA Reflex (VK_NV_low_latency2). Default off; gated additionally by device support.\n"
+                        + " minimum-interval-us: 0 = no framerate cap (Reflex just paces submission).");
+        FILE.setComment("hdr",
+                " HDR display output. mode selects the presentation convention: off keeps the SDR AgX path,\n"
+                        + " pq targets ST.2084/PQ (required by HDR10 swapchains and Frame Generation), auto picks\n"
+                        + " PQ when the swapchain supports it. force-sdr pins SDR even when a mode is selected.\n"
+                        + " paper-white-nits / peak-nits drive the scene-HDR -> display mapping.");
     }
 
     private static Path resolveConfigPath() {
@@ -114,73 +117,38 @@ public final class UpscalerConfig {
         }
     }
 
-    private static void loadFileValues(Path file) {
-        if (file == null || !Files.isRegularFile(file)) {
-            return;
-        }
+    private static CommentedFileConfig loadFile(Path path) {
+        CommentedFileConfig config = CommentedFileConfig.builder(path, TomlFormat.instance())
+                .onFileNotFound(FileNotFoundAction.CREATE_EMPTY)
+                .preserveInsertionOrder()
+                .sync()
+                .build();
         try {
-            for (String raw : Files.readAllLines(file)) {
-                String line = raw.trim();
-                if (line.isEmpty() || line.startsWith("#")) {
-                    continue;
-                }
-                int eq = line.indexOf('=');
-                if (eq < 0) {
-                    continue;
-                }
-                String key = unquote(line.substring(0, eq).trim());
-                String rhs = line.substring(eq + 1).trim();
-                // Strip a trailing inline comment from bare (unquoted) scalars only.
-                if (!rhs.isEmpty() && rhs.charAt(0) != '"' && rhs.charAt(0) != '\'') {
-                    int hash = rhs.indexOf('#');
-                    if (hash >= 0) {
-                        rhs = rhs.substring(0, hash).trim();
-                    }
-                }
-                if (!key.isEmpty()) {
-                    FILE_VALUES.put(key, unquote(rhs));
-                }
-            }
-        } catch (IOException e) {
-            LOGGER.warn("Failed to read Upscaler config {}: {}", file, e.toString());
+            config.load();
+        } catch (Exception e) {
+            LOGGER.warn("Failed to read Upscaler config {}: {}", path, e.toString());
         }
+        return config;
     }
 
-    private static String unquote(String s) {
-        if (s.length() >= 2) {
-            char c = s.charAt(0);
-            if ((c == '"' || c == '\'') && s.charAt(s.length() - 1) == c) {
-                return s.substring(1, s.length() - 1);
-            }
-        }
-        return s;
+    private static Boolean fileBoolean(String tomlPath) {
+        return FILE.contains(tomlPath) ? FILE.<Boolean>get(tomlPath) : null;
     }
 
-    /** TOML literal-string form; backslashes and Windows paths survive verbatim. */
-    private static String tomlString(String value) {
-        if (value.indexOf('\'') < 0) {
-            return "'" + value + "'";
-        }
-        // Fall back to a basic string with the minimal escapes when a literal string can't hold the value.
-        return '"' + value.replace("\\", "\\\\").replace("\"", "\\\"") + '"';
+    private static Number fileNumber(String tomlPath) {
+        return FILE.contains(tomlPath) ? FILE.<Number>get(tomlPath) : null;
     }
 
-    /** The raw external value for a key: system property wins, then the TOML file, else {@code null}. */
-    private static String externalRaw(String key) {
-        String prop = System.getProperty(key);
-        if (prop != null) {
-            return prop;
-        }
-        return FILE_VALUES.get(key);
-    }
-
-    /** Whether the active external value for a key came from the file rather than a system property. */
-    private static boolean externalFromFile(String key) {
-        return System.getProperty(key) == null && FILE_VALUES.containsKey(key);
+    private static String fileString(String tomlPath) {
+        return FILE.contains(tomlPath) ? FILE.<String>get(tomlPath) : null;
     }
 
     public interface RuntimeSetting<T> {
+        /** The {@code -Dupscaler.*} system property name that overrides this setting. */
         String key();
+
+        /** The dotted path of this setting inside the nested {@code config/upscaler.toml} tables. */
+        String tomlPath();
 
         T defaultValue();
 
@@ -190,25 +158,32 @@ public final class UpscalerConfig {
 
         void reloadFromSystemProperties();
 
-        /** This setting's value as a TOML right-hand-side literal, or {@code null} to omit it from the file. */
-        String tomlValue();
+        /** Writes this setting's current value into the given config at {@link #tomlPath()}. */
+        void writeToFile(CommentedConfig config);
     }
 
     public static final class BooleanSetting implements RuntimeSetting<Boolean> {
         private final String key;
+        private final String tomlPath;
         private final boolean defaultValue;
         private volatile boolean value;
 
-        private BooleanSetting(String key, boolean defaultValue) {
+        private BooleanSetting(String key, String tomlPath, boolean defaultValue) {
             this.key = key;
+            this.tomlPath = tomlPath;
             this.defaultValue = defaultValue;
-            this.value = readExternalBoolean(key, defaultValue);
+            this.value = resolveInitial();
             SETTINGS.add(this);
         }
 
         @Override
         public String key() {
             return key;
+        }
+
+        @Override
+        public String tomlPath() {
+            return tomlPath;
         }
 
         @Override
@@ -236,33 +211,44 @@ public final class UpscalerConfig {
         }
 
         @Override
-        public String tomlValue() {
-            return Boolean.toString(value);
+        public void writeToFile(CommentedConfig config) {
+            config.set(tomlPath, value);
         }
 
-        private static boolean readExternalBoolean(String key, boolean fallback) {
-            String value = externalRaw(key);
-            return value != null ? Boolean.parseBoolean(value.trim()) : fallback;
+        private boolean resolveInitial() {
+            String prop = System.getProperty(key);
+            if (prop != null) {
+                return Boolean.parseBoolean(prop.trim());
+            }
+            Boolean fromFile = fileBoolean(tomlPath);
+            return fromFile != null ? fromFile : defaultValue;
         }
     }
 
     public static final class IntSetting implements RuntimeSetting<Integer> {
         private final String key;
+        private final String tomlPath;
         private final int defaultValue;
         private final IntUnaryOperator sanitize;
         private volatile int value;
 
-        private IntSetting(String key, int defaultValue, IntUnaryOperator sanitize) {
+        private IntSetting(String key, String tomlPath, int defaultValue, IntUnaryOperator sanitize) {
             this.key = key;
+            this.tomlPath = tomlPath;
             this.defaultValue = sanitize.applyAsInt(defaultValue);
             this.sanitize = sanitize;
-            this.value = readExternalInt(key, this.defaultValue, sanitize);
+            this.value = resolveInitial();
             SETTINGS.add(this);
         }
 
         @Override
         public String key() {
             return key;
+        }
+
+        @Override
+        public String tomlPath() {
+            return tomlPath;
         }
 
         @Override
@@ -286,37 +272,72 @@ public final class UpscalerConfig {
 
         @Override
         public void reloadFromSystemProperties() {
-            this.value = readInt(key, defaultValue, sanitize);
+            String prop = System.getProperty(key);
+            if (prop == null) {
+                this.value = defaultValue;
+                return;
+            }
+            try {
+                this.value = sanitize.applyAsInt(Integer.parseInt(prop.trim()));
+            } catch (NumberFormatException e) {
+                this.value = defaultValue;
+            }
         }
 
         @Override
-        public String tomlValue() {
-            return Integer.toString(value);
+        public void writeToFile(CommentedConfig config) {
+            config.set(tomlPath, value);
+        }
+
+        private int resolveInitial() {
+            String prop = System.getProperty(key);
+            if (prop != null) {
+                try {
+                    return sanitize.applyAsInt(Integer.parseInt(prop.trim()));
+                } catch (NumberFormatException e) {
+                    return defaultValue;
+                }
+            }
+            Number fromFile = fileNumber(tomlPath);
+            return fromFile != null ? sanitize.applyAsInt(fromFile.intValue()) : defaultValue;
         }
     }
 
     public static final class FloatSetting implements RuntimeSetting<Float> {
         private final String key;
+        private final String tomlPath;
         private final float defaultValue;
-        // Maps external input (system property / UI / default) into the stored value domain, e.g. degrees ->
-        // radians. File values are already in the value domain, so they skip this transform.
+        // Maps a raw external number (system property, file, or the constructor's raw default) into the
+        // stored value domain, e.g. degrees -> radians.
         private final DoubleUnaryOperator inputTransform;
+        // Inverse of inputTransform: maps the stored value domain back to the raw external domain (e.g.
+        // radians -> degrees) for writeToFile, so a value round-trips through the file unchanged instead
+        // of having inputTransform re-applied to an already-transformed number on the next load.
+        private final DoubleUnaryOperator outputTransform;
         // Idempotent guard on a value-domain number (clamp / finite check); safe to apply to any source.
         private final DoubleUnaryOperator valueClamp;
         private volatile float value;
 
-        private FloatSetting(String key, float rawDefault, DoubleUnaryOperator inputTransform, DoubleUnaryOperator valueClamp) {
+        private FloatSetting(String key, String tomlPath, float rawDefault, DoubleUnaryOperator inputTransform,
+                             DoubleUnaryOperator outputTransform, DoubleUnaryOperator valueClamp) {
             this.key = key;
+            this.tomlPath = tomlPath;
             this.inputTransform = inputTransform;
+            this.outputTransform = outputTransform;
             this.valueClamp = valueClamp;
             this.defaultValue = (float) valueClamp.applyAsDouble(inputTransform.applyAsDouble(rawDefault));
-            this.value = readExternalFloat(key, this.defaultValue, inputTransform, valueClamp);
+            this.value = resolveInitial();
             SETTINGS.add(this);
         }
 
         @Override
         public String key() {
             return key;
+        }
+
+        @Override
+        public String tomlPath() {
+            return tomlPath;
         }
 
         @Override
@@ -357,29 +378,55 @@ public final class UpscalerConfig {
         }
 
         @Override
-        public String tomlValue() {
-            return Float.toString(value);
+        public void writeToFile(CommentedConfig config) {
+            // Round-trip through Float.toString() so the file gets the shortest decimal that reproduces
+            // this float (e.g. "0.6"), not outputTransform's raw double with float's binary noise spelled
+            // out to 17 digits (e.g. 0.6000000487130328).
+            float raw = (float) outputTransform.applyAsDouble(value);
+            config.set(tomlPath, Double.parseDouble(Float.toString(raw)));
+        }
+
+        private float resolveInitial() {
+            String prop = System.getProperty(key);
+            if (prop != null) {
+                try {
+                    return (float) valueClamp.applyAsDouble(inputTransform.applyAsDouble(Double.parseDouble(prop.trim())));
+                } catch (NumberFormatException e) {
+                    return defaultValue;
+                }
+            }
+            Number fromFile = fileNumber(tomlPath);
+            if (fromFile == null) {
+                return defaultValue;
+            }
+            return (float) valueClamp.applyAsDouble(inputTransform.applyAsDouble(fromFile.doubleValue()));
         }
     }
 
     public static final class StringSetting implements RuntimeSetting<String> {
         private final String key;
+        private final String tomlPath;
         private final String defaultValue;
         private final UnaryOperator<String> sanitize;
         private volatile String value;
 
-        private StringSetting(String key, String defaultValue, UnaryOperator<String> sanitize) {
+        private StringSetting(String key, String tomlPath, String defaultValue, UnaryOperator<String> sanitize) {
             this.key = key;
+            this.tomlPath = tomlPath;
             this.defaultValue = sanitize.apply(defaultValue);
             this.sanitize = sanitize;
-            String external = externalRaw(key);
-            this.value = sanitize.apply(external != null ? external : defaultValue);
+            this.value = resolveInitial();
             SETTINGS.add(this);
         }
 
         @Override
         public String key() {
             return key;
+        }
+
+        @Override
+        public String tomlPath() {
+            return tomlPath;
         }
 
         @Override
@@ -403,24 +450,40 @@ public final class UpscalerConfig {
         }
 
         @Override
-        public String tomlValue() {
-            return tomlString(value);
+        public void writeToFile(CommentedConfig config) {
+            config.set(tomlPath, value);
+        }
+
+        private String resolveInitial() {
+            String prop = System.getProperty(key);
+            if (prop != null) {
+                return sanitize.apply(prop);
+            }
+            String fromFile = fileString(tomlPath);
+            return sanitize.apply(fromFile != null ? fromFile : defaultValue);
         }
     }
 
     public static final class OptionalStringSetting implements RuntimeSetting<String> {
         private final String key;
+        private final String tomlPath;
         private volatile String value;
 
-        private OptionalStringSetting(String key) {
+        private OptionalStringSetting(String key, String tomlPath) {
             this.key = key;
-            this.value = externalRaw(key);
+            this.tomlPath = tomlPath;
+            this.value = resolveInitial();
             SETTINGS.add(this);
         }
 
         @Override
         public String key() {
             return key;
+        }
+
+        @Override
+        public String tomlPath() {
+            return tomlPath;
         }
 
         @Override
@@ -444,37 +507,50 @@ public final class UpscalerConfig {
         }
 
         @Override
-        public String tomlValue() {
-            return value != null ? tomlString(value) : null;
+        public void writeToFile(CommentedConfig config) {
+            if (value != null) {
+                config.set(tomlPath, value);
+            } else {
+                config.remove(tomlPath);
+            }
+        }
+
+        private String resolveInitial() {
+            String prop = System.getProperty(key);
+            return prop != null ? prop : fileString(tomlPath);
         }
     }
 
     public static final class Rt {
-        public static final BooleanSetting ENABLED = bool("upscaler.rt", true);
-        public static final StringSetting OUTPUT_MODE = string("upscaler.rt.output", "rt", Rt::sanitizeOutputMode);
-        public static final BooleanSetting CANCEL_VANILLA_WORLD = bool("upscaler.rt.cancelVanillaWorld", false);
-        public static final BooleanSetting CANCEL_VANILLA_WORLD_LOG = bool("upscaler.rt.cancelVanillaWorld.log", true);
-        public static final BooleanSetting PBR = bool("upscaler.rt.pbr", true);
-        public static final IntSetting WORKER_THREADS = intAtLeast("upscaler.rt.workerThreads", defaultWorkerThreads(), 1);
+        public static final BooleanSetting ENABLED = bool("upscaler.rt", "enabled", true);
+        public static final StringSetting OUTPUT_MODE = string("upscaler.rt.output", "output", "rt", Rt::sanitizeOutputMode);
+        public static final BooleanSetting CANCEL_VANILLA_WORLD =
+                bool("upscaler.rt.cancelVanillaWorld", "cancel-vanilla-world.enabled", false);
+        public static final BooleanSetting CANCEL_VANILLA_WORLD_LOG =
+                bool("upscaler.rt.cancelVanillaWorld.log", "cancel-vanilla-world.log", true);
+        public static final BooleanSetting PBR = bool("upscaler.rt.pbr", "pbr", true);
+        public static final IntSetting WORKER_THREADS =
+                intAtLeast("upscaler.rt.workerThreads", "worker-threads", defaultWorkerThreads(), 1);
 
         private Rt() {
         }
 
         public static final class Composite {
-            public static final BooleanSetting ENABLED = bool("upscaler.rt.composite", false);
-            public static final IntSetting DEBUG_VIEW = intValue("upscaler.rt.debugView", 0);
-            public static final IntSetting SPP = intAtLeast("upscaler.rt.spp", 1, 1);
-            public static final BooleanSetting WATER_WAVES = bool("upscaler.rt.waterWaves", true);
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.composite", "composite.enabled", false);
+            public static final IntSetting DEBUG_VIEW = intValue("upscaler.rt.debugView", "composite.debug-view", 0);
+            public static final IntSetting SPP = intAtLeast("upscaler.rt.spp", "composite.spp", 1, 1);
+            public static final BooleanSetting WATER_WAVES =
+                    bool("upscaler.rt.waterWaves", "composite.water-waves", true);
             public static final FloatSetting SUN_ANGULAR_RADIUS =
-                    radians("upscaler.rt.sunAngularRadius", 0.6f);
+                    radians("upscaler.rt.sunAngularRadius", "composite.sun-angular-radius-deg", 0.6f);
             public static final FloatSetting MOON_ANGULAR_RADIUS =
-                    radians("upscaler.rt.moonAngularRadius", 1.5f);
+                    radians("upscaler.rt.moonAngularRadius", "composite.moon-angular-radius-deg", 1.5f);
             public static final FloatSetting SUN_NOON_SOUTH_TILT =
-                    radians("upscaler.rt.sunNoonSouthDeg", 0.0f);
-            public static final FloatSetting RENDER_SCALE =
-                    clampedFloat("upscaler.rt.renderScale", 0.5f, 0.25f, 1.0f);
-            public static final FloatSetting JITTER_SIGN_X = finiteFloat("upscaler.rt.jitterSignX", 1.0f);
-            public static final FloatSetting JITTER_SIGN_Y = finiteFloat("upscaler.rt.jitterSignY", -1.0f);
+                    radians("upscaler.rt.sunNoonSouthDeg", "composite.sun-noon-south-tilt-deg", 0.0f);
+            public static final FloatSetting JITTER_SIGN_X =
+                    finiteFloat("upscaler.rt.jitterSignX", "composite.jitter-sign-x", 1.0f);
+            public static final FloatSetting JITTER_SIGN_Y =
+                    finiteFloat("upscaler.rt.jitterSignY", "composite.jitter-sign-y", -1.0f);
 
             private Composite() {
             }
@@ -482,56 +558,54 @@ public final class UpscalerConfig {
 
         public static final class Terrain {
             public static final IntSetting ASYNC_DISPATCH_PER_TICK =
-                    intAtLeast("upscaler.rt.asyncDispatchPerTick", 64, 0);
+                    intAtLeast("upscaler.rt.asyncDispatchPerTick", "terrain.async-dispatch-per-tick", 64, 0);
             public static final IntSetting SECTION_RESULTS_PER_TICK =
-                    intAtLeast("upscaler.rt.sectionResultsPerTick", 64, 0);
-            // Wall-clock budget for one streaming pass (snapshot dispatch + upload drain). The per-frame
-            // slice scales with queue pressure from STREAM_BUDGET_MS (near-idle) up to STREAM_BUDGET_MAX_MS
-            // (big backlog: initial fill, F3+A, teleport, fast flight) so fill throughput recovers when it
-            // matters and the cost drops back once the queue clears. STREAM_FALLBACK_BUDGET_MS is the
-            // per-tick slice used only when no world frame is streaming (loading screens), where a long
-            // pass hitches nothing.
+                    intAtLeast("upscaler.rt.sectionResultsPerTick", "terrain.section-results-per-tick", 64, 0);
             public static final FloatSetting STREAM_BUDGET_MS =
-                    clampedFloat("upscaler.rt.streamBudgetMs", 1.5f, 0.05f, 100f);
+                    clampedFloat("upscaler.rt.streamBudgetMs", "terrain.stream-budget-ms", 1.5f, 0.05f, 100f);
             public static final FloatSetting STREAM_BUDGET_MAX_MS =
-                    clampedFloat("upscaler.rt.streamBudgetMaxMs", 6f, 0.05f, 100f);
+                    clampedFloat("upscaler.rt.streamBudgetMaxMs", "terrain.stream-budget-max-ms", 6f, 0.05f, 100f);
             public static final FloatSetting STREAM_FALLBACK_BUDGET_MS =
-                    clampedFloat("upscaler.rt.streamFallbackBudgetMs", 8f, 0.05f, 100f);
+                    clampedFloat("upscaler.rt.streamFallbackBudgetMs", "terrain.stream-fallback-budget-ms", 8f, 0.05f, 100f);
             public static final IntSetting MAX_INFLIGHT_SECTIONS =
-                    intAtLeast("upscaler.rt.maxInflightSections", 192, 0);
+                    intAtLeast("upscaler.rt.maxInflightSections", "terrain.max-inflight-sections", 192, 0);
             public static final IntSetting SECTION_TABLE_INITIAL_CAPACITY =
-                    intAtLeast("upscaler.rt.sectionTableInitialCapacity", 512, 1);
+                    intAtLeast("upscaler.rt.sectionTableInitialCapacity", "terrain.section-table-initial-capacity", 512, 1);
             public static final IntSetting REBASE_DISTANCE_BLOCKS =
-                    intAtLeast("upscaler.rt.rebaseDistanceBlocks", 128, 0);
+                    intAtLeast("upscaler.rt.rebaseDistanceBlocks", "terrain.rebase-distance-blocks", 128, 0);
 
             private Terrain() {
             }
         }
 
         public static final class Omm {
-            public static final BooleanSetting ENABLED = bool("upscaler.rt.omm", true);
-            public static final IntSetting SUBDIVISION = clampedInt("upscaler.rt.ommSubdivision", 4, 0, 12);
-            public static final BooleanSetting STATS = bool("upscaler.rt.ommStats", false);
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.omm", "omm.enabled", true);
+            public static final IntSetting SUBDIVISION =
+                    clampedInt("upscaler.rt.ommSubdivision", "omm.subdivision", 4, 0, 12);
+            public static final BooleanSetting STATS = bool("upscaler.rt.ommStats", "omm.stats", false);
 
             private Omm() {
             }
         }
 
         public static final class Entities {
-            public static final BooleanSetting ENABLED = bool("upscaler.rt.entities", true);
-            // Reuse an entity's previous mesh buffers + BLAS when this frame's pose is a rigid transform
-            // (translation and/or yaw) of the cached one — still mobs, item frames, armor stands, and
-            // spinning/bobbing dropped items skip the re-upload and BLAS refit entirely.
-            public static final BooleanSetting RIGID_REUSE = bool("upscaler.rt.entityRigidReuse", true);
-            public static final BooleanSetting PARTICLES_ENABLED = bool("upscaler.rt.particles", true);
-            public static final IntSetting MAX_ENTITIES = intAtLeast("upscaler.rt.maxEntities", 1024, 1);
-            public static final IntSetting BE_VIEW_CHUNKS = intAtLeast("upscaler.rt.beViewChunks", 8, 0);
-            public static final IntSetting BE_BUILDS_PER_FRAME = intAtLeast("upscaler.rt.beBuildsPerFrame", 8, 0);
-            public static final BooleanSetting REFIT = bool("upscaler.rt.entityRefit", true);
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.entities", "entities.enabled", true);
+            public static final BooleanSetting RIGID_REUSE =
+                    bool("upscaler.rt.entityRigidReuse", "entities.rigid-reuse", true);
+            public static final BooleanSetting PARTICLES_ENABLED =
+                    bool("upscaler.rt.particles", "particles.enabled", true);
+            public static final IntSetting MAX_ENTITIES =
+                    intAtLeast("upscaler.rt.maxEntities", "entities.max-entities", 1024, 1);
+            public static final IntSetting BE_VIEW_CHUNKS =
+                    intAtLeast("upscaler.rt.beViewChunks", "entities.block-entities.view-chunks", 8, 0);
+            public static final IntSetting BE_BUILDS_PER_FRAME =
+                    intAtLeast("upscaler.rt.beBuildsPerFrame", "entities.block-entities.builds-per-frame", 8, 0);
+            public static final BooleanSetting REFIT =
+                    bool("upscaler.rt.entityRefit", "entities.refit.enabled", true);
             public static final IntSetting REFIT_REBUILD_INTERVAL =
-                    intAtLeast("upscaler.rt.refitRebuildInterval", 120, 1);
+                    intAtLeast("upscaler.rt.refitRebuildInterval", "entities.refit.rebuild-interval", 120, 1);
             public static final IntSetting CAPTURE_INITIAL_VERTICES =
-                    intAtLeast("upscaler.rt.entityCaptureInitialVertices", 1024, 1);
+                    intAtLeast("upscaler.rt.entityCaptureInitialVertices", "entities.capture-initial-vertices", 1024, 1);
 
             private Entities() {
             }
@@ -550,17 +624,18 @@ public final class UpscalerConfig {
         }
 
         public static final class EntityTextures {
-            public static final IntSetting MAX_TEXTURES = intAtLeast("upscaler.rt.maxEntityTextures", 256, 1);
-            public static final BooleanSetting PBR = bool("upscaler.rt.entityPbr", true);
+            public static final IntSetting MAX_TEXTURES =
+                    intAtLeast("upscaler.rt.maxEntityTextures", "entities.textures.max-textures", 256, 1);
+            public static final BooleanSetting PBR = bool("upscaler.rt.entityPbr", "entities.textures.pbr", true);
 
             private EntityTextures() {
             }
         }
 
         public static final class DlssRr {
-            public static final BooleanSetting ENABLED = bool("upscaler.rt.dlssRr", false);
-            public static final IntSetting PRESET = intValue("upscaler.rt.dlssRr.preset", 0);
-            public static final IntSetting QUALITY = intValue("upscaler.rt.dlssRr.quality", 0);
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.dlssRr", "dlss-rr.enabled", false);
+            public static final IntSetting PRESET = intValue("upscaler.rt.dlssRr.preset", "dlss-rr.preset", 0);
+            public static final IntSetting QUALITY = intValue("upscaler.rt.dlssRr.quality", "dlss-rr.quality", 0);
 
             private DlssRr() {
             }
@@ -568,10 +643,9 @@ public final class UpscalerConfig {
 
         /** DLSS Frame Generation. Default off; gated additionally by hardware/driver availability. */
         public static final class Fg {
-            public static final BooleanSetting ENABLED = bool("upscaler.rt.fg", false);
-            // Frames generated per rendered frame: 1 = 2x (one interpolated), 2 = 3x, etc. Clamped at
-            // runtime to the driver's reported DLSSG.MultiFrameCountMax.
-            public static final IntSetting MULTI_FRAME_COUNT = intAtLeast("upscaler.rt.fg.multiFrameCount", 1, 1);
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.fg", "frame-generation.enabled", false);
+            public static final IntSetting MULTI_FRAME_COUNT =
+                    intAtLeast("upscaler.rt.fg.multiFrameCount", "frame-generation.multi-frame-count", 1, 1);
 
             private Fg() {
             }
@@ -584,23 +658,30 @@ public final class UpscalerConfig {
          * spec requires for {@code vkSetLatencySleepModeNV} to take effect land in a later phase.
          */
         public static final class Reflex {
-            public static final BooleanSetting ENABLED = bool("upscaler.rt.reflex", false);
-            public static final BooleanSetting LOW_LATENCY_BOOST = bool("upscaler.rt.reflex.boost", false);
-            // 0 = no framerate cap (Reflex just paces submission, doesn't limit fps).
-            public static final IntSetting MINIMUM_INTERVAL_US = intAtLeast("upscaler.rt.reflex.minIntervalUs", 0, 0);
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.reflex", "reflex.enabled", false);
+            public static final BooleanSetting LOW_LATENCY_BOOST =
+                    bool("upscaler.rt.reflex.boost", "reflex.low-latency-boost", false);
+            public static final IntSetting MINIMUM_INTERVAL_US =
+                    intAtLeast("upscaler.rt.reflex.minIntervalUs", "reflex.minimum-interval-us", 0, 0);
 
             private Reflex() {
             }
         }
 
         public static final class Exposure {
-            public static final StringSetting MODE = string("upscaler.rt.exposure.mode", "auto", Exposure::sanitizeMode);
-            public static final FloatSetting MANUAL_EV = finiteFloat("upscaler.rt.exposure.manualEv", 0.0f);
-            public static final FloatSetting KEY = exposureScale("upscaler.rt.exposure.key", 0.18f);
-            public static final FloatSetting MIN_EV = finiteFloat("upscaler.rt.exposure.minEv", -0.5f);
-            public static final FloatSetting MAX_EV = finiteFloat("upscaler.rt.exposure.maxEv", 2.5f);
-            public static final FloatSetting ADAPT_UP = exposureScale("upscaler.rt.exposure.adaptUp", 0.12f);
-            public static final FloatSetting ADAPT_DOWN = exposureScale("upscaler.rt.exposure.adaptDown", 0.35f);
+            public static final StringSetting MODE =
+                    string("upscaler.rt.exposure.mode", "exposure.mode", "auto", Exposure::sanitizeMode);
+            public static final FloatSetting MANUAL_EV =
+                    finiteFloat("upscaler.rt.exposure.manualEv", "exposure.manual-ev", 0.0f);
+            public static final FloatSetting KEY = exposureScale("upscaler.rt.exposure.key", "exposure.key", 0.18f);
+            public static final FloatSetting MIN_EV =
+                    finiteFloat("upscaler.rt.exposure.minEv", "exposure.min-ev", -0.5f);
+            public static final FloatSetting MAX_EV =
+                    finiteFloat("upscaler.rt.exposure.maxEv", "exposure.max-ev", 2.5f);
+            public static final FloatSetting ADAPT_UP =
+                    exposureScale("upscaler.rt.exposure.adaptUp", "exposure.adapt-up", 0.12f);
+            public static final FloatSetting ADAPT_DOWN =
+                    exposureScale("upscaler.rt.exposure.adaptDown", "exposure.adapt-down", 0.35f);
 
             private Exposure() {
             }
@@ -629,7 +710,7 @@ public final class UpscalerConfig {
         }
 
         public static final class BufferPool {
-            public static final BooleanSetting STATS = bool("upscaler.rt.poolStats", false);
+            public static final BooleanSetting STATS = bool("upscaler.rt.poolStats", "buffer-pool.stats", false);
 
             private BufferPool() {
             }
@@ -637,7 +718,7 @@ public final class UpscalerConfig {
 
         /** Render-frame timing + hitch logging. See {@code RtFrameStats}. */
         public static final class FrameStats {
-            public static final BooleanSetting ENABLED = bool("upscaler.rt.frameStats", false);
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.frameStats", "frame-stats.enabled", false);
 
             private FrameStats() {
             }
@@ -652,24 +733,27 @@ public final class UpscalerConfig {
          * off toward {@code peakNits}.
          */
         public static final class Hdr {
-            public static final StringSetting MODE = string("upscaler.rt.hdr.mode", "off", Hdr::sanitizeMode);
+            public static final StringSetting MODE = string("upscaler.rt.hdr.mode", "hdr.mode", "off", Hdr::sanitizeMode);
             public static final FloatSetting PAPER_WHITE_NITS =
-                    clampedFloat("upscaler.rt.hdr.paperWhiteNits", 200.0f, 80.0f, 1000.0f);
+                    clampedFloat("upscaler.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 1000.0f);
             public static final FloatSetting PEAK_NITS =
-                    clampedFloat("upscaler.rt.hdr.peakNits", 1000.0f, 80.0f, 10000.0f);
-            public static final BooleanSetting FORCE_SDR = bool("upscaler.rt.hdr.forceSdr", false);
+                    clampedFloat("upscaler.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 10000.0f);
+            public static final BooleanSetting FORCE_SDR =
+                    bool("upscaler.rt.hdr.forceSdr", "hdr.force-sdr", false);
             /**
              * Phase 2 step A: render the vanilla GUI/HUD into a separate transparent overlay target and
              * composite it back over the world. Default off. In SDR this should look identical to vanilla; it
              * is the prerequisite for keeping UI out of the world tonemap once HDR presentation lands.
              */
-            public static final BooleanSetting UI_OVERLAY = bool("upscaler.rt.hdr.uiOverlay", false);
+            public static final BooleanSetting UI_OVERLAY =
+                    bool("upscaler.rt.hdr.uiOverlay", "hdr.ui-overlay", false);
             /**
              * Create Minecraft's swapchain in PQ (ST.2084/HDR10, whatever pixel format the surface pairs with
              * that color space — commonly a 10-bit UNORM) instead of SDR, when the surface advertises it.
              * Default off, falls back to SDR when unavailable.
              */
-            public static final BooleanSetting PQ_SWAPCHAIN = bool("upscaler.rt.hdr.pqSwapchain", false);
+            public static final BooleanSetting PQ_SWAPCHAIN =
+                    bool("upscaler.rt.hdr.pqSwapchain", "hdr.pq-swapchain", false);
 
             private Hdr() {
             }
@@ -703,88 +787,50 @@ public final class UpscalerConfig {
     }
 
     public static final class Ngx {
-        public static final OptionalStringSetting PATH = optionalString("upscaler.ngx.path");
+        public static final OptionalStringSetting PATH = optionalString("upscaler.ngx.path", "ngx.path");
 
         private Ngx() {
         }
     }
 
-    private static BooleanSetting bool(String key, boolean fallback) {
-        return new BooleanSetting(key, fallback);
+    private static BooleanSetting bool(String key, String tomlPath, boolean fallback) {
+        return new BooleanSetting(key, tomlPath, fallback);
     }
 
-    private static StringSetting string(String key, String fallback, UnaryOperator<String> sanitize) {
-        return new StringSetting(key, fallback, sanitize);
+    private static StringSetting string(String key, String tomlPath, String fallback, UnaryOperator<String> sanitize) {
+        return new StringSetting(key, tomlPath, fallback, sanitize);
     }
 
-    private static OptionalStringSetting optionalString(String key) {
-        return new OptionalStringSetting(key);
+    private static OptionalStringSetting optionalString(String key, String tomlPath) {
+        return new OptionalStringSetting(key, tomlPath);
     }
 
-    private static IntSetting intValue(String key, int fallback) {
-        return new IntSetting(key, fallback, v -> v);
+    private static IntSetting intValue(String key, String tomlPath, int fallback) {
+        return new IntSetting(key, tomlPath, fallback, v -> v);
     }
 
-    private static IntSetting intAtLeast(String key, int fallback, int min) {
-        return new IntSetting(key, fallback, v -> Math.max(min, v));
+    private static IntSetting intAtLeast(String key, String tomlPath, int fallback, int min) {
+        return new IntSetting(key, tomlPath, fallback, v -> Math.max(min, v));
     }
 
-    private static IntSetting clampedInt(String key, int fallback, int min, int max) {
-        return new IntSetting(key, fallback, v -> Math.clamp(v, min, max));
+    private static IntSetting clampedInt(String key, String tomlPath, int fallback, int min, int max) {
+        return new IntSetting(key, tomlPath, fallback, v -> Math.clamp(v, min, max));
     }
 
-    private static FloatSetting finiteFloat(String key, float fallback) {
-        return new FloatSetting(key, fallback, v -> v, v -> Double.isFinite(v) ? v : fallback);
+    private static FloatSetting finiteFloat(String key, String tomlPath, float fallback) {
+        return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Double.isFinite(v) ? v : fallback);
     }
 
-    private static FloatSetting exposureScale(String key, float fallback) {
-        return new FloatSetting(key, fallback, v -> v, v -> Math.clamp(v, 1.0e-4, 1.0e4));
+    private static FloatSetting exposureScale(String key, String tomlPath, float fallback) {
+        return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Math.clamp(v, 1.0e-4, 1.0e4));
     }
 
-    private static FloatSetting clampedFloat(String key, float fallback, float min, float max) {
-        return new FloatSetting(key, fallback, v -> v, v -> Math.clamp(v, min, max));
+    private static FloatSetting clampedFloat(String key, String tomlPath, float fallback, float min, float max) {
+        return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Math.clamp(v, min, max));
     }
 
-    private static FloatSetting radians(String key, float fallbackDegrees) {
-        return new FloatSetting(key, fallbackDegrees, Math::toRadians, v -> Double.isFinite(v) ? v : 0.0);
-    }
-
-    private static int readInt(String key, int fallback, IntUnaryOperator sanitize) {
-        String value = System.getProperty(key);
-        if (value == null) {
-            return fallback;
-        }
-        try {
-            return sanitize.applyAsInt(Integer.parseInt(value));
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
-    }
-
-    private static int readExternalInt(String key, int fallback, IntUnaryOperator sanitize) {
-        String value = externalRaw(key);
-        if (value == null) {
-            return fallback;
-        }
-        try {
-            return sanitize.applyAsInt(Integer.parseInt(value.trim()));
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
-    }
-
-    private static float readExternalFloat(String key, float fallback, DoubleUnaryOperator inputTransform, DoubleUnaryOperator valueClamp) {
-        String value = externalRaw(key);
-        if (value == null) {
-            return fallback;
-        }
-        try {
-            double parsed = Double.parseDouble(value.trim());
-            double inDomain = externalFromFile(key) ? parsed : inputTransform.applyAsDouble(parsed);
-            return (float) valueClamp.applyAsDouble(inDomain);
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
+    private static FloatSetting radians(String key, String tomlPath, float fallbackDegrees) {
+        return new FloatSetting(key, tomlPath, fallbackDegrees, Math::toRadians, Math::toDegrees, v -> Double.isFinite(v) ? v : 0.0);
     }
 
     private static int defaultWorkerThreads() {

@@ -18,9 +18,12 @@ import net.minecraft.network.chat.Component;
  * runtime setting: the initial value is read from the current config, and the value-update listener writes
  * back through {@code set(...)} so changes take effect on the next frame.
  *
- * <p>Only settings the renderer re-reads per-frame are exposed here — toggles that would require a device,
- * pipeline, or buffer-pool rebuild (worker threads, render scale, OMM, max-entity capacities, PBR material
- * flags, DLSS-RR feature init) are intentionally left to the {@code -Dupscaler.*} startup surface.
+ * <p>Only settings the renderer re-reads per-frame are exposed here — toggles that would require a device or
+ * buffer-pool rebuild (worker threads, OMM, max-entity capacities, PBR material flags) are intentionally
+ * left to the {@code -Dupscaler.*} startup surface. DLSS-RR quality is the exception: the render resolution
+ * is queried from NGX for the chosen quality mode on every resize (see
+ * {@code RtDlssRr.queryOptimalRenderSize}), and the RR feature itself is recreated live whenever
+ * {@code quality} changes (see {@code RtDlssRr.ensureFeature}), so it is safe to expose here.
  */
 public final class RtVideoOptions {
     private RtVideoOptions() {
@@ -36,6 +39,7 @@ public final class RtVideoOptions {
             entities(),
             particles(),
             waterWaves(),
+            dlssQuality(),
             debugView(),
         };
     }
@@ -45,7 +49,9 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             "upscaler.options.rt.exposureMode",
             OptionInstance.cachedConstantTooltip(Component.translatable("upscaler.options.rt.exposureMode.tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.translatable("upscaler.options.rt.exposureMode." + value)),
+            // CycleButton (used for Enum values) already prepends "caption: " itself (DisplayState.
+            // NAME_AND_VALUE), so this must return only the value's text, not caption + value again.
+            (caption, value) -> Component.translatable("upscaler.options.rt.exposureMode." + value),
             new OptionInstance.Enum<>(List.of("auto", "manual"), Codec.STRING),
             setting.get(),
             setting::set);
@@ -103,12 +109,34 @@ public final class RtVideoOptions {
         return bool("upscaler.options.rt.waterWaves", UpscalerConfig.Rt.Composite.WATER_WAVES);
     }
 
+    // NVSDK_NGX_PerfQuality_Value, ordered performance -> quality for the slider. Per NVIDIA's DLSS-RR
+    // programming guide, Ray Reconstruction only supports Performance(0), Balanced(1), Quality(2),
+    // Ultra-Performance(3), and DLAA(5) — Ultra Quality(4) is not a valid PerfQualityValue for RR (its
+    // optimal-settings query returns a zeroed render size for it) and is deliberately excluded here.
+    private static final List<Integer> DLSS_QUALITY_ORDER = List.of(3, 0, 1, 2, 5);
+
+    private static OptionInstance<Integer> dlssQuality() {
+        IntSetting setting = UpscalerConfig.Rt.DlssRr.QUALITY;
+        int initialQuality = DLSS_QUALITY_ORDER.contains(setting.value()) ? setting.value() : 0;
+        int initialPosition = DLSS_QUALITY_ORDER.indexOf(initialQuality);
+        return new OptionInstance<>(
+            "upscaler.options.rt.dlssQuality",
+            OptionInstance.cachedConstantTooltip(Component.translatable("upscaler.options.rt.dlssQuality.tooltip")),
+            (caption, position) -> Options.genericValueLabel(caption,
+                    Component.translatable("upscaler.options.rt.dlssQuality." + DLSS_QUALITY_ORDER.get(position))),
+            new OptionInstance.IntRange(0, DLSS_QUALITY_ORDER.size() - 1),
+            initialPosition,
+            position -> setting.set(DLSS_QUALITY_ORDER.get(position)));
+    }
+
     private static OptionInstance<Integer> debugView() {
         IntSetting setting = UpscalerConfig.Rt.Composite.DEBUG_VIEW;
         return new OptionInstance<>(
             "upscaler.options.rt.debugView",
             OptionInstance.cachedConstantTooltip(Component.translatable("upscaler.options.rt.debugView.tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.translatable("upscaler.options.rt.debugView." + value)),
+            // CycleButton (used for Enum values) already prepends "caption: " itself (DisplayState.
+            // NAME_AND_VALUE), so this must return only the value's text, not caption + value again.
+            (caption, value) -> Component.translatable("upscaler.options.rt.debugView." + value),
             new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7), Codec.INT),
             Math.clamp(setting.value(), 0, 7),
             setting::set);

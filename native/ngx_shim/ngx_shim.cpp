@@ -324,6 +324,28 @@ NGX_SHIM_EXPORT int ngxshim_dlssd_available() {
     return available;
 }
 
+// Optimal render resolution + recommended sharpness for a display size and quality mode
+// (NVSDK_NGX_PerfQuality_Value), for the Ray Reconstruction (DLSSD) feature specifically — its
+// render:display ratios are queried from the DLSSD callback rather than assumed to match DLSS-SR's
+// (see NGX_DLSSD_GET_OPTIMAL_SETTINGS; create_dlssd below rejects a mismatched ratio at non-1:1
+// quality values with FAIL_InvalidParameter). Returns NVSDK_NGX_Result.
+NGX_SHIM_EXPORT int ngxshim_query_optimal_dlssd(unsigned int displayWidth, unsigned int displayHeight, int quality,
+                                                unsigned int* outRenderWidth, unsigned int* outRenderHeight,
+                                                float* outSharpness) {
+    NGX_LOG("query_optimal_dlssd: enter display=%ux%u quality=%d g_capabilityParams=%p", displayWidth, displayHeight, quality, (void*) g_capabilityParams);
+    if (!g_capabilityParams) {
+        return -1;
+    }
+    unsigned int maxW = 0, maxH = 0, minW = 0, minH = 0;
+    NVSDK_NGX_Result r = NGX_DLSSD_GET_OPTIMAL_SETTINGS(
+            g_capabilityParams, displayWidth, displayHeight, (NVSDK_NGX_PerfQuality_Value) quality,
+            outRenderWidth, outRenderHeight, &maxW, &maxH, &minW, &minH, outSharpness);
+    g_lastResult = (int) r;
+    NGX_LOG("query_optimal_dlssd: exit r=0x%08x render=%ux%u", (unsigned) r,
+            outRenderWidth ? *outRenderWidth : 0u, outRenderHeight ? *outRenderHeight : 0u);
+    return (int) r;
+}
+
 // Creates a DLSS Ray Reconstruction (DLSSD) feature. Configured for our path tracer: DL-unified
 // denoise, roughness packed into normals.w, and HW (non-linear, reversed-Z) depth — the rgen writes
 // ndc z/w, shared with Frame Generation. renderPreset is an NVSDK_NGX_RayReconstruction_Hint_Render_Preset

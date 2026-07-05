@@ -57,6 +57,11 @@ dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// Layered TOML config (config/upscaler.toml) — NightConfig, the same library NeoForge's
+	// ModConfigSpec is built on.
+	include implementation("com.electronwill.night-config:core:3.8.3")
+	include implementation("com.electronwill.night-config:toml:3.8.3")
 }
 
 processResources {

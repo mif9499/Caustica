@@ -43,7 +43,7 @@ public final class RtDlssRr {
         return UpscalerConfig.Rt.DlssRr.PRESET.value();
     }
 
-    private static int quality() {
+    public static int quality() {
         return UpscalerConfig.Rt.DlssRr.QUALITY.value();
     }
 
@@ -121,6 +121,42 @@ public final class RtDlssRr {
             failed = true;
             UpscalerMod.LOGGER.error("DLSS-RR evaluate failed; RT composite continues without it", t);
             return false;
+        }
+    }
+
+    /**
+     * Asks NGX what render resolution the current quality mode expects for the given display size.
+     * Returns {@code null} only when RR is off (or already disabled from an earlier failure elsewhere)
+     * — in that state there is no feature to query and the caller should trace at full resolution.
+     * Once RR is active, a failed query (stale shim, old driver, bad NGX result) throws instead of
+     * silently falling back, so a broken render/display sync is never masked.
+     */
+    public int[] queryOptimalRenderSize(int displayWidth, int displayHeight) {
+        if (!enabled() || failed) {
+            return null;
+        }
+        if (!(((GpuDeviceAccessor) RenderSystem.getDevice()).upscaler$getBackend() instanceof VulkanDevice device)) {
+            return null;
+        }
+        ensureInitialized(device);
+        if (!lib.hasQueryOptimalDlssd()) {
+            throw new IllegalStateException("ngxshim is missing ngxshim_query_optimal_dlssd (stale native shim)");
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outWidth = arena.allocate(ValueLayout.JAVA_INT);
+            MemorySegment outHeight = arena.allocate(ValueLayout.JAVA_INT);
+            MemorySegment outSharpness = arena.allocate(ValueLayout.JAVA_FLOAT);
+            int rc = lib.queryOptimalDlssd(displayWidth, displayHeight, quality(), outWidth, outHeight, outSharpness);
+            if (NgxRuntime.ngxFailed(rc)) {
+                throw new IllegalStateException("ngxshim_query_optimal_dlssd failed: 0x" + Integer.toHexString(rc));
+            }
+            int renderWidth = outWidth.get(ValueLayout.JAVA_INT, 0);
+            int renderHeight = outHeight.get(ValueLayout.JAVA_INT, 0);
+            if (renderWidth <= 0 || renderHeight <= 0) {
+                throw new IllegalStateException(
+                        "ngxshim_query_optimal_dlssd returned invalid render size " + renderWidth + "x" + renderHeight);
+            }
+            return new int[] { renderWidth, renderHeight };
         }
     }
 

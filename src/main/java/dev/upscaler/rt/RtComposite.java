@@ -114,17 +114,8 @@ public final class RtComposite {
     // Celestial rotation axis (the pole the sun/moon arc about): perpendicular to the east-west arc,
     // tilted by SUN_NOON_SOUTH_TILT. Pushed so the sky shader can build the sun/moon square's tangent
     // frame (right = travel direction) and wheel the starfield. = normalize(noonDir x sunriseDir).
-    /**
-     * RT trace scale: the path tracer + guide buffers run at this fraction of display resolution and
-     * DLSS-RR upscales to display. Only applied when DLSS-RR is enabled; the no-RR reference traces
-     * at 1.0 (a 1:1 blit). Default 1/1.5 matches DLSS MaxQuality. {@code -Dupscaler.rt.renderScale}.
-     */
     // Sign of the sub-pixel jitter as reported to DLSS-RR + applied to the primary ray, mirroring the
     // validated DLSS-SR convention (Vulkan flipped clip space wants Y negated).
-    private static float renderScale() {
-        return UpscalerConfig.Rt.Composite.RENDER_SCALE.value();
-    }
-
     private static float jitterSignX() {
         return UpscalerConfig.Rt.Composite.JITTER_SIGN_X.value();
     }
@@ -236,6 +227,10 @@ public final class RtComposite {
     private int displayH = -1;
     private int renderW = -1;
     private int renderH = -1;
+    // What ensureOutput last sized the render/guide images for, so a quality change (or RR being
+    // toggled) at a fixed window size is noticed even though displayW/displayH didn't change.
+    private boolean renderSizeRrEnabled;
+    private int renderSizeRrQuality = Integer.MIN_VALUE;
 
     // Motion-vector reprojection state: the previous frame's camera-relative view-projection and
     // camera position, read into the push constant each frame then advanced at frame end.
@@ -601,8 +596,11 @@ public final class RtComposite {
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
+        boolean rrEnabled = RtDlssRr.enabled();
+        int rrQuality = rrEnabled ? RtDlssRr.quality() : Integer.MIN_VALUE;
         if (output != null && displayImage != null && hdrDisplayImage != null && rrOutput != null && exposure.ready()
-                && displayW == width && displayH == height) {
+                && displayW == width && displayH == height
+                && renderSizeRrEnabled == rrEnabled && renderSizeRrQuality == rrQuality) {
             return;
         }
         ctx.waitIdle(); // resize is rare; no in-flight frame may use the old image/descriptor
@@ -621,9 +619,14 @@ public final class RtComposite {
         displayH = height;
         // The path tracer + its guide buffers run at render res; DLSS-RR (or a fallback blit) upscales
         // to display res. With RR off there is no upscaler, so trace at 1:1 for a faithful reference.
-        float scale = RtDlssRr.enabled() ? renderScale() : 1.0f;
-        renderW = Math.max(1, Math.round(width * scale));
-        renderH = Math.max(1, Math.round(height * scale));
+        // With RR on, ask NGX what render resolution its chosen quality mode actually expects rather
+        // than assuming a fixed ratio: different quality modes (and driver versions) use different
+        // ratios, and DLSSD's own optimal-settings query is the source of truth for what it will accept.
+        int[] optimal = rrEnabled ? RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height) : null;
+        renderW = optimal != null ? optimal[0] : width;
+        renderH = optimal != null ? optimal[1] : height;
+        renderSizeRrEnabled = rrEnabled;
+        renderSizeRrQuality = rrQuality;
 
         // RT traces into an HDR (R16G16B16A16_SFLOAT) target so radiance > 1 survives to the display
         // mapping seam. displayImage stays R8G8B8A8 to match the main target it is copied into
@@ -795,15 +798,10 @@ public final class RtComposite {
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.trace")) {
                 active.trace(cmd, renderW, renderH, pushAddr);
             }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT color visible to exposure histogram/fixed write
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
-                exposure.record(ctx, cmd, stack, output);
-            }
+            VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT writes visible to DLSS reads
             // DLSS-RR denoise + upscale. The RT pass wrote noisy color (render res) + guides;
             // RR reads them and writes the display-res denoised result straight into rrOutput.
             if (rrPath && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
-                VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT writes visible to DLSS reads
                 // DLSS expects the reported jitter to be the NEGATION of what was added to the
                 // primary ray (pixelCenter += jitter), matching the mcvr reference (apply +J, report
                 // -J). The shader push above uses +jitter; report -jitter here.
@@ -825,7 +823,20 @@ public final class RtComposite {
                     blitUpscale(cmd, stack, output, rrOutput);
                 }
             }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
+            VulkanCommandEncoder.memoryBarrier(cmd, stack); // rrOutput visible to exposure histogram
+
+            // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
+            // pre-RR trace: RR has no notion of exposure (DLSS-RR Integration Guide §3.7 — ignore
+            // exposure/auto-exposure/sharpness entirely for RR), so this is purely our own metering
+            // choice, independent of RR's pipeline placement. Metering the noisy pre-RR buffer made
+            // the histogram's log-luminance average biased by Monte-Carlo noise (Jensen's inequality
+            // on the concave log()), so the computed exposure drifted with SPP; rrOutput is stable
+            // regardless of SPP, keeping exposure consistent.
+            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
+                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
+                exposure.record(ctx, cmd, stack, rrOutput);
+            }
+            VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
 
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {

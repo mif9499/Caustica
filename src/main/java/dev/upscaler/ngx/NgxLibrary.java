@@ -27,6 +27,7 @@ public final class NgxLibrary {
 	private final MethodHandle createDlss;
 	private final MethodHandle evaluate;
 	private final MethodHandle dlssdAvailable;
+	private final MethodHandle queryOptimalDlssd;
 	private final MethodHandle createDlssd;
 	private final MethodHandle evaluateDlssd;
 	private final MethodHandle dlssgAvailable;
@@ -71,6 +72,10 @@ public final class NgxLibrary {
 		// albedo / specular albedo / normals guide buffers (roughness is packed in normals.w).
 		this.dlssdAvailable = handle(lookup, "ngxshim_dlssd_available",
 				FunctionDescriptor.of(ValueLayout.JAVA_INT));
+		// int ngxshim_query_optimal_dlssd(u32 dispW, u32 dispH, int quality, u32* outRW, u32* outRH, float* outSharp)
+		this.queryOptimalDlssd = optionalHandle(lookup, "ngxshim_query_optimal_dlssd",
+				FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
+						ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 		this.createDlssd = handle(lookup, "ngxshim_create_dlssd",
 				FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
 						ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
@@ -213,6 +218,24 @@ public final class NgxLibrary {
 			return ((int) this.dlssdAvailable.invokeExact()) != 0;
 		} catch (Throwable t) {
 			throw new RuntimeException("ngxshim_dlssd_available failed", t);
+		}
+	}
+
+	/** Whether the loaded shim exposes the DLSSD optimal-settings query (false for a stale, pre-query shim). */
+	public boolean hasQueryOptimalDlssd() {
+		return queryOptimalDlssd != null;
+	}
+
+	public int queryOptimalDlssd(int displayWidth, int displayHeight, int quality,
+	                             MemorySegment outRenderWidth, MemorySegment outRenderHeight, MemorySegment outSharpness) {
+		if (queryOptimalDlssd == null) {
+			return -1;
+		}
+		try {
+			return (int) this.queryOptimalDlssd.invokeExact(displayWidth, displayHeight, quality,
+					outRenderWidth, outRenderHeight, outSharpness);
+		} catch (Throwable t) {
+			throw new RuntimeException("ngxshim_query_optimal_dlssd failed", t);
 		}
 	}
 
