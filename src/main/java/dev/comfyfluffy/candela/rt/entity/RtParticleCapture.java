@@ -11,9 +11,10 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
  *
  * <p>Positions arrive camera-relative ({@code SingleQuadParticle.extract} subtracts the camera position);
  * a per-frame {@link #setOffset offset} (camPos − rebaseOrigin) shifts them into the renderer's rebased
- * space so the TLAS instance transform is identity, exactly like captured entities. Light is ignored (v1
- * particles are unlit); the per-particle colour rides through as the bulk {@code addVertex} ARGB and the
- * texture slot through {@link RtEntityCapture#currentTexSlot} (set per layer by the caller).
+ * space so the TLAS instance transform is identity, exactly like captured entities. The per-particle colour
+ * rides through as raw albedo; raygen applies RT direct/indirect lighting instead of baking vanilla's
+ * lightmap here. The texture slot comes through {@link RtEntityCapture#currentTexSlot} (set per layer by
+ * the caller).
  */
 public final class RtParticleCapture implements VertexConsumer {
     private final RtEntityCapture out;
@@ -41,25 +42,12 @@ public final class RtParticleCapture implements VertexConsumer {
         this.oz = oz;
     }
 
-    /**
-     * Forward the buffered vertex to the entity capture (zero normal → geometric; ARGB → tint; slot).
-     * The albedo is dimmed by the particle's lightmap brightness so particles respond to ambient light
-     * instead of rendering fullbright — otherwise an unlit ~0.8 particle blows out against a dark scene
-     * once auto-exposure cranks up. Emissive particles (flame/lava/end-rod) report a fullbright lightmap
-     * via getLightColor, so they stay bright; ambient-lit particles (smoke/splash) dim in the dark.
-     */
+    /** Forward the buffered vertex to the entity capture (zero normal -> geometric; ARGB -> tint; slot). */
     public void flush() {
         if (!pending) {
             return;
         }
-        int block = (light >> 4) & 0xF;
-        int sky = (light >> 20) & 0xF;
-        float bright = Math.max(block, sky) / 15.0f;
-        int a = (color >>> 24) & 0xFF;
-        int r = Math.round(((color >> 16) & 0xFF) * bright);
-        int g = Math.round(((color >> 8) & 0xFF) * bright);
-        int b = Math.round((color & 0xFF) * bright);
-        out.addVertex(x, y, z, (a << 24) | (r << 16) | (g << 8) | b, u, v, 0, 0, 0f, 0f, 0f);
+        out.addVertex(x, y, z, color, u, v, 0, 0, 0f, 0f, 0f);
         pending = false;
     }
 

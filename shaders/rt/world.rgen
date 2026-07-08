@@ -384,9 +384,11 @@ vec3 sampleGGXVNDF(vec3 n, vec3 ve, float rough, inout uint s) {
 // TLAS instance-mask bits (set on the Java side, ANDed against these per-ray cull masks):
 //   bit 0 (0x01) — secondary rays: shadows, GI bounces, reflections.
 //   bit 1 (0x02) — the primary camera ray.
-// Terrain / entities / block entities keep 0xFF (both bits) and are seen by everything. Particles use 0x02
-// (primary only → no shadows / GI / reflections; the v1 scope). The first-person camera owner uses 0x01
-// (secondary only), so the player appears in reflections / shadows but never blocks the camera ray.
+// Terrain / entities / block entities keep 0xFF (both bits) and are seen by everything. Particles use 0x02:
+// primary-visible receiver billboards only. They can be lit by rays they spawn from the camera hit, but
+// secondary rays never hit particles, so they do not cast shadows, show in reflections, or contribute GI.
+// The first-person camera owner uses 0x01 (secondary only), so the player appears in reflections / shadows
+// but never blocks the camera ray.
 const uint CULL_SECONDARY = 0x01u;
 const uint CULL_PRIMARY = 0x02u;
 const uint TERRAIN_BUCKETS = 4u;
@@ -633,21 +635,46 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
             continue;
         }
 
-        // Particles (material == 2): unlit camera-facing billboard, shown directly and the path stops.
-        // The instance mask keeps particles off shadow/GI rays, so this only ever fires at bounce 0, where
-        // throughput == 1 and L += albedo writes the texel straight to the pixel (no emission/GI into the
-        // scene — the v1 scope). Cutout is handled in world.rahit; here we just display and terminate.
+        // Particles (material == 2): camera-facing receiver billboard. The instance mask keeps particles
+        // off secondary rays, so this only fires at bounce 0; they receive direct light and one diffuse path
+        // continuation into the scene, but never appear in shadows/reflections/GI or emit radiance.
         if (material == MATERIAL_PARTICLE) {
+            vec3 albedo = payload.albedo;
             gv_normal = n;
-            gv_albedo = payload.albedo; // RR demodulation target = the particle texel (keeps it sharp)
+            gv_albedo = albedo; // RR demodulation target = the particle texel (keeps it sharp)
             gv_specAlb = vec3(0.0);
             gv_rough = 1.0;
             gv_hitCamRel = hitPos - pc.camOffset;
             gv_motionHitCamRel = gv_hitCamRel;
             gv_motionUseRefracted = false;
             gv_motionObjDisp = payload.motionPrev; // per-particle MV (P-particles MV): de-ghost moving particles
-            L += throughput * payload.albedo;
-            break;
+
+            vec3 lightDir = pc.lightDir.xyz;
+            float lightHalfAngle = pc.lightDir.w;
+            if (lightHalfAngle > 0.0) {
+                lightDir = sampleSquare(lightDir, lightHalfAngle, seed);
+            }
+            // Billboards are effectively two-sided receivers. Bias from the side facing the light; shadow rays
+            // exclude particles anyway, but this keeps the origin sane when the light is behind the camera side.
+            float signedNdl = dot(n, lightDir);
+            float ndl = abs(signedNdl);
+            if (ndl > 0.0) {
+                vec3 shadowOrigin = hitPos + (signedNdl >= 0.0 ? n : -n) * SURF_BIAS;
+                vec3 vis = visibility(shadowOrigin, lightDir, 10000.0);
+                if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
+                    L += throughput * albedo * INV_PI * pc.lightRadiance.xyz * ndl * vis;
+                }
+            }
+
+            if (bounce >= maxBounces) {
+                break;
+            }
+            throughput *= albedo;
+            ro = hitPos + n * SURF_BIAS;
+            rd = cosineDir(n, seed);
+            rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
+            showCelestial = false; // diffuse receiver: direct sun/moon was handled by NEE above
+            continue;
         }
 
         // P5.2 water: smooth dielectric interface. Choose reflection or refraction stochastically by the

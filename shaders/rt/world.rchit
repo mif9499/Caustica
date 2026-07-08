@@ -286,9 +286,9 @@ vec3 applyBreaking(vec3 albedo, vec3 rayOrigin, vec3 rayDir, float hitT, vec3 n)
 }
 
 void main() {
-    // Particle billboard: same geom-table/UV/bindless-atlas path as entities, but unlit — albedo =
-    // atlas texel * per-particle colour (tint.rgb), tagged material 2 so the raygen shows it and stops
-    // (no lighting/GI/emission). Reached only by the primary ray (instance mask 0x02). Cutout: rahit.
+    // Particle billboard: same geom-table/UV/bindless-atlas path as entities. Albedo is atlas texel *
+    // per-particle colour; raygen treats material 2 as a primary-visible diffuse receiver with no emission
+    // or specular response. Reached only by the primary ray (instance mask 0x02). Cutout: rahit.
     if ((gl_InstanceCustomIndexEXT & PARTICLE_BIT) != 0) {
         int idx = gl_InstanceCustomIndexEXT & IDX_MASK;
         EntityGeom g = EntityTable(pcAddr.entityTableAddr).e[idx];

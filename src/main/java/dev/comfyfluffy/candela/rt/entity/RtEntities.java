@@ -81,7 +81,7 @@ public final class RtEntities {
     private static final int MASK_PRIMARY = 0x02;
     /** Default mask: visible to every ray (terrain and ordinary entities use this). */
     private static final int MASK_ALL = 0xFF;
-    /** Particles are primary-ray-only (no shadows / GI / reflections; the v1 scope). */
+    /** Particles are primary-ray-only: visible/lit by the camera path, invisible to shadows/GI/reflections. */
     private static final int PARTICLE_MASK = MASK_PRIMARY;
     public static boolean particlesEnabled() {
         return CandelaConfig.Rt.Entities.PARTICLES_ENABLED.value();
@@ -675,7 +675,7 @@ public final class RtEntities {
     }
 
     /**
-     * Capture this frame's billboard particles as ONE combined mesh + BLAS (cutout, unlit, camera-only),
+     * Capture this frame's billboard particles as ONE combined mesh + BLAS (cutout, camera-only receiver),
      * with per-particle motion vectors. We iterate the LIVE {@code Particle} objects (via accessor mixins)
      * rather than the public packed render state, because only the live objects carry stable identity —
      * needed to diff each particle's center against last frame for the MV. Each particle is extracted into
