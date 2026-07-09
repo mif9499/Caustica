@@ -58,9 +58,14 @@ bool payloadShowCelestial() { return (payload.flags & PAYLOAD_SHOW_CELESTIAL) !=
 const float PI = 3.14159265359;
 float pow2(float x) { return x * x; }
 
-const vec3 SUN_DISC_RADIANCE  = vec3(22.0, 19.0, 15.0);
+// Near-white top-of-atmosphere disc radiances: the visible warm/red tint now comes from multiplying by
+// transmittanceToSpace(dir) at draw time (same extinction as the in-scatter march), so at noon the sun
+// reads warm-white and at the horizon it reddens on exactly the sky's own sunset curve.
+const vec3 SUN_DISC_RADIANCE  = vec3(24.0, 23.0, 21.5);
 const vec3 MOON_DISC_RADIANCE = vec3(1.7, 1.85, 2.2);   // lit-side moon (HDR, reads bright at night exposure)
-const vec3 STAR_COLOR         = vec3(0.62, 0.66, 0.80);
+// Vibrance applied to the atmosphere in-scatter only (not discs/stars/night ambient): luminance-preserving,
+// so GI energy is unchanged — the noon zenith gets a deeper blue and sunsets richer oranges.
+const float SKY_SATURATION = 1.2;
 // VISIBLE disc half-angles, matched to vanilla: the sun/moon quads are drawn at half-width 30/20 at
 // distance 100 → half-angle = atan(0.30) / atan(0.20). Decoupled from the NEE light radius (≈0.6°).
 const float SUN_DISC_HALF_ANGLE  = 0.29146; // atan(30/100), vanilla sun size
@@ -80,9 +85,17 @@ const float MIE_BETA   = 21.0e-6;          // Mie scattering at sea level
 const float RAY_SCALE_H = 8000.0;          // Rayleigh density scale height
 const float MIE_SCALE_H = 1200.0;          // Mie density scale height
 const float MIE_G      = 0.758;            // Mie anisotropy (forward-scattering)
+// Ozone: absorption only (no scattering), tent-shaped density peaking at 25 km. Its green-heavy
+// absorption is what keeps the zenith deep blue at noon and turns twilight purple-orange — without it
+// the sky greys out near the horizon and sunsets skew yellow.
+const vec3  OZONE_BETA = vec3(0.650e-6, 1.881e-6, 0.085e-6);
+const float OZONE_CENTER_H = 25000.0;
+const float OZONE_WIDTH_H  = 15000.0;
 const float SUN_INTENSITY = 22.0;
 const int   ATMOS_PRIMARY_STEPS = 16;
 const int   ATMOS_LIGHT_STEPS   = 8;
+
+float ozoneDensity(float h) { return max(0.0, 1.0 - abs(h - OZONE_CENTER_H) / OZONE_WIDTH_H); }
 
 // Smaller root of ray vs sphere of radius r centred at origin (negative if behind / no hit handled by x>y).
 vec2 raySphere(vec3 o, vec3 d, float r) {
@@ -111,19 +124,19 @@ vec3 atmosphere(vec3 dir, vec3 sunDir) {
                  / ((2.0 + g * g) * pow(max(1.0 + g * g - 2.0 * g * mu, 0.0), 1.5));
 
     vec3 sumR = vec3(0.0), sumM = vec3(0.0);
-    float odR = 0.0, odM = 0.0;                   // view-ray optical depth accumulators
+    float odR = 0.0, odM = 0.0, odO = 0.0;        // view-ray optical depth accumulators
     float tCur = tStart;
     for (int i = 0; i < ATMOS_PRIMARY_STEPS; i++) {
         vec3 p = orig + dir * (tCur + segLen * 0.5);
         float h = length(p) - PLANET_R;
         float hr = exp(-h / RAY_SCALE_H) * segLen;
         float hm = exp(-h / MIE_SCALE_H) * segLen;
-        odR += hr; odM += hm;
+        odR += hr; odM += hm; odO += ozoneDensity(h) * segLen;
 
         // March toward the sun to accumulate the light-ray optical depth (transmittance to space).
         vec2 tl = raySphere(p, sunDir, ATMOS_R);
         float segLenL = tl.y / float(ATMOS_LIGHT_STEPS);
-        float tlCur = 0.0, odRL = 0.0, odML = 0.0;
+        float tlCur = 0.0, odRL = 0.0, odML = 0.0, odOL = 0.0;
         bool blocked = false;
         for (int j = 0; j < ATMOS_LIGHT_STEPS; j++) {
             vec3 pl = p + sunDir * (tlCur + segLenL * 0.5);
@@ -131,10 +144,12 @@ vec3 atmosphere(vec3 dir, vec3 sunDir) {
             if (hl < 0.0) { blocked = true; break; } // sun is below this point's horizon → in shadow
             odRL += exp(-hl / RAY_SCALE_H) * segLenL;
             odML += exp(-hl / MIE_SCALE_H) * segLenL;
+            odOL += ozoneDensity(hl) * segLenL;
             tlCur += segLenL;
         }
         if (!blocked) {
-            vec3 tau = RAY_BETA * (odR + odRL) + MIE_BETA * 1.1 * (odM + odML);
+            vec3 tau = RAY_BETA * (odR + odRL) + MIE_BETA * 1.1 * (odM + odML)
+                     + OZONE_BETA * (odO + odOL);
             vec3 atten = exp(-tau);
             sumR += hr * atten;
             sumM += hm * atten;
@@ -142,6 +157,27 @@ vec3 atmosphere(vec3 dir, vec3 sunDir) {
         tCur += segLen;
     }
     return SUN_INTENSITY * (sumR * RAY_BETA * phaseR + sumM * MIE_BETA * phaseM);
+}
+
+// Extinction from the camera to space along `dir` (Rayleigh + Mie + ozone; the sun-below-horizon case
+// needs no explicit planet test — a grazing/downward path picks up enormous optical depth, so the
+// transmittance rolls to zero smoothly on its own). Tints the sun/moon discs at draw time, and is ported
+// verbatim to RtComposite.writeSky so the NEE sunlight on terrain follows the identical sunset curve —
+// the disc, the sky, and the light can never disagree.
+vec3 transmittanceToSpace(vec3 dir) {
+    vec3 orig = vec3(0.0, PLANET_R + 2000.0, 0.0);
+    vec2 t = raySphere(orig, dir, ATMOS_R);
+    if (t.y <= 0.0) return vec3(1.0);
+    float segLen = t.y / float(ATMOS_LIGHT_STEPS);
+    float odR = 0.0, odM = 0.0, odO = 0.0;
+    for (int i = 0; i < ATMOS_LIGHT_STEPS; i++) {
+        vec3 p = orig + dir * segLen * (float(i) + 0.5);
+        float h = length(p) - PLANET_R;
+        odR += exp(-h / RAY_SCALE_H) * segLen;
+        odM += exp(-h / MIE_SCALE_H) * segLen;
+        odO += ozoneDensity(h) * segLen;
+    }
+    return exp(-(RAY_BETA * odR + MIE_BETA * 1.1 * odM + OZONE_BETA * odO));
 }
 
 // Build the celestial body's square tangent frame: `right` along the arc-travel direction, `up`
@@ -216,7 +252,11 @@ vec3 stars(vec3 dir, float starBrightness, float VdotS) {
     if (star <= 0.0) return vec3(0.0);
     float bright = 0.55 + 0.45 * hash13(id + 71.0);    // mild per-star brightness variation
     star *= bright * min(dir.y * 3.0, 1.0) * max(0.0, 1.0 - pow(abs(VdotS) * 1.002, 100.0));
-    return 0.2 * star * STAR_COLOR * starBrightness;
+    // Per-star colour temperature: hash picks a spot on a warm-orange ↔ blue-white ramp (real star
+    // populations), replacing the old uniform pale-blue STAR_COLOR. Average luminance is kept close to
+    // the old constant so the night exposure doesn't shift.
+    vec3 starCol = mix(vec3(0.78, 0.60, 0.42), vec3(0.50, 0.62, 0.95), hash13(id + 137.0));
+    return 0.2 * star * starCol * starBrightness;
 }
 
 void main() {
@@ -229,12 +269,29 @@ void main() {
     float starBrightness = pc.lightRadiance.w;
 
     // Physically-based in-scattering: blue zenith, bright/desaturated horizon, warm Mie halo + red
-    // sunset all fall out of the Rayleigh/Mie march. At night the sun is below the horizon so the light
-    // march is blocked → near-zero; we add a faint night ambient + the rotating starfield underneath.
-    vec3 col = atmosphere(dir, sd);
+    // sunset all fall out of the Rayleigh/Mie/ozone march. At night the sun is below the horizon so the
+    // light march is blocked → near-zero; we add a faint night ambient + the rotating starfield underneath.
+    //
+    // Soft horizon: below-horizon rays used to march into the planet-surface clip, drawing a hard fixed
+    // line across the sky. Instead, march the ray flattened onto the horizon (same azimuth, y=0) so the
+    // gradient continues seamlessly downward, with an exponential falloff so it settles into darkness
+    // instead of a uniform bright band.
+    vec3 mdir = dir;
+    float downFade = 1.0;
+    if (dir.y < 0.0) {
+        vec2 flat2 = vec2(dir.x, dir.z);
+        float fl = length(flat2);
+        mdir = fl > 1.0e-4 ? vec3(flat2.x / fl, 0.0, flat2.y / fl) : vec3(1.0, 0.0, 0.0);
+        downFade = exp(dir.y * 3.0);
+    }
+    vec3 col = atmosphere(mdir, sd);
+    // Luminance-preserving vibrance on the in-scatter only (see SKY_SATURATION).
+    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    col = max(mix(vec3(lum), col, SKY_SATURATION), vec3(0.0));
     float up = clamp(dir.y, 0.0, 1.0);
     vec3 nightAmbient = mix(NIGHT_HORIZON, NIGHT_ZENITH, up);
     col += nightAmbient * (1.0 - day);
+    col *= downFade;
     col += stars(dir, starBrightness, VdotS);
 
     // Sun & moon discs — sampled from the vanilla celestials atlas, gated to rays that haven't already
@@ -251,16 +308,21 @@ void main() {
             // makes a huge ring. Raise the texture luminance to a high power — only the bright core
             // survives, the halo collapses to ~0.
             float core = pow(clamp(dot(t, t) * 0.45, 0.0, 1.0), 6.0);
-            col += SUN_DISC_RADIANCE * core * sunUp;
+            // transmittanceToSpace reddens+dims the disc through the sunset on the sky's own curve.
+            col += SUN_DISC_RADIANCE * transmittanceToSpace(dir) * core * sunUp;
         }
+        // Same horizon gate as the sun: with the soft-horizon change, below-horizon rays no longer clip
+        // at the planet, so without this the moon disc would stay visible after it set.
+        float moonUp = clamp((pc.moonDir.y + 0.0625) / 0.125, 0.0, 1.0);
         squareBody(dir, pc.moonDir.xyz, MOON_DISC_HALF_ANGLE, local);
-        if (all(lessThan(abs(local), vec2(1.0)))) {
+        if (all(lessThan(abs(local), vec2(1.0))) && moonUp > 0.0) {
             vec2 uv = mix(pc.moonUv.xy, pc.moonUv.zw, local * 0.5 + 0.5);
             vec3 t = textureLod(celestialsAtlas, uv, 0.0).rgb;
             // Moon: a smoothstep contrast ramp suppresses the faint halo while
-            // keeping the lit phase shape from the texture.
+            // keeping the lit phase shape from the texture. The transmittance tint
+            // gives a warm amber moon at moonrise/set, silver-white once high.
             float m = smoothstep(0.0, 1.0, min(length(t), 1.0)) * 1.3;
-            col += MOON_DISC_RADIANCE * t * m * pow2(1.0 - day);
+            col += MOON_DISC_RADIANCE * transmittanceToSpace(dir) * t * m * pow2(1.0 - day) * moonUp;
         }
     }
 

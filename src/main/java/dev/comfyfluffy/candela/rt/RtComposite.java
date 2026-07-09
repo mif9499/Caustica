@@ -967,26 +967,36 @@ public final class RtComposite {
         starAngle = probe.getValue(EnvironmentAttributes.STAR_ANGLE, partial) * (float) (Math.PI / 180.0);
         starBrightness = probe.getValue(EnvironmentAttributes.STAR_BRIGHTNESS, partial);
         dayFactor = smoothstep(-0.08f, 0.10f, sunY);
-        if (sunY > 0.0f) {
-            // Sun: fades out as it sets; warm at the horizon, white overhead.
-            float strength = smoothstep(-0.06f, 0.18f, sunY);
-            float warmth = smoothstep(0.0f, 0.30f, sunY);
-            float sunPeak = 20.0f;
+        float[] trans = new float[3];
+        if (sunY > -0.05f) {
+            // Sun stays the NEE light through the whole sunset: its colour/intensity is the atmosphere's
+            // own transmittance (same Rayleigh+Mie+ozone march as the sky shader — see
+            // atmosphereTransmittance), so it whitens overhead and reddens+dims into the horizon on
+            // exactly the curve the visible sky follows. The old hand-tuned warmth ramp switched to the
+            // moon at sunY == 0 while the sun was still at ~16% strength, which read as a hard light pop
+            // at sunset/sunrise; transmittance is already near zero at the horizon, and the short
+            // smoothstep below carries the remainder to exactly zero before the moon takes over.
+            atmosphereTransmittance(sunX, sunY, sunZ, trans);
+            float fade = smoothstep(-0.05f, 0.005f, sunY);
+            float sunPeak = 21.0f;
             lx = sunX; ly = sunY; lz = sunZ;
-            rr = 1.00f * sunPeak * strength;
-            rg = Mth.lerp(warmth, 0.42f, 0.96f) * sunPeak * strength;
-            rb = Mth.lerp(warmth, 0.18f, 0.90f) * sunPeak * strength;
+            rr = sunPeak * trans[0] * fade;
+            rg = sunPeak * trans[1] * fade;
+            rb = sunPeak * trans[2] * fade;
             lightRadius = CandelaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.value();
         } else {
-            // Moon: dim cool light, fading in as the sun drops below the horizon. Scaled by the lit
-            // fraction so a new moon gives near-zero moonlight (matches the procedural disc shape).
-            float moonStrength = 1.0f - dayFactor;
+            // Moon: dim cool light, ramping up from zero at the sun→moon handoff (sunY = -0.05, where
+            // the sun fade also reaches zero) so the switch is invisible. Scaled by the lit fraction so
+            // a new moon gives near-zero moonlight, and tinted by the same transmittance so a low moon
+            // is warm amber, silver once high (or zero while it is below the horizon).
+            atmosphereTransmittance(moonX, moonY, moonZ, trans);
+            float moonStrength = smoothstep(0.04f, 0.22f, -sunY);
             float litFraction = 1.0f - Math.abs(moonPhase - 4.0f) / 4.0f; // 0 new .. 1 full
             float moonPeak = 0.30f * (0.15f + 0.85f * litFraction);
             lx = moonX; ly = moonY; lz = moonZ;
-            rr = 0.30f * moonPeak * moonStrength;
-            rg = 0.36f * moonPeak * moonStrength;
-            rb = 0.55f * moonPeak * moonStrength;
+            rr = 0.30f * moonPeak * moonStrength * trans[0];
+            rg = 0.36f * moonPeak * moonStrength * trans[1];
+            rb = 0.55f * moonPeak * moonStrength * trans[2];
             lightRadius = CandelaConfig.Rt.Composite.MOON_ANGULAR_RADIUS.value();
         }
         push.putFloat(208, sunX); push.putFloat(212, sunY); push.putFloat(216, sunZ); push.putFloat(220, dayFactor);
@@ -1046,6 +1056,39 @@ public final class RtComposite {
     private static float smoothstep(float edge0, float edge1, float x) {
         float t = Math.clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
         return t * t * (3f - 2f * t);
+    }
+
+    /**
+     * RGB transmittance from the camera to space along {@code dir} — a verbatim port of
+     * {@code world.rmiss}'s {@code transmittanceToSpace} (Rayleigh + Mie + ozone optical depth, 8-step
+     * march from 2 km altitude; constants must stay in lock-step with the shader). This is what colours
+     * the NEE sun/moonlight: because the sky shader tints its visible discs with the identical function,
+     * the light on terrain and the sky's sunset can never disagree. A direction below the geometric
+     * horizon accumulates enormous optical depth, so the result rolls to zero smoothly on its own —
+     * no explicit planet-shadow test needed.
+     */
+    private static void atmosphereTransmittance(float dx, float dy, float dz, float[] out) {
+        final double planetR = 6371000.0, atmosR = 6471000.0;
+        final double[] rayBeta = {5.5e-6, 13.0e-6, 22.4e-6};
+        final double mieBeta = 21.0e-6 * 1.1;
+        final double[] ozoneBeta = {0.650e-6, 1.881e-6, 0.085e-6};
+        final double oy = planetR + 2000.0;
+        // Larger root of ray vs atmosphere sphere, origin (0, oy, 0).
+        double b = oy * dy;
+        double tEnd = -b + Math.sqrt(Math.max(b * b - (oy * oy - atmosR * atmosR), 0.0));
+        double seg = tEnd / 8.0;
+        double odR = 0.0, odM = 0.0, odO = 0.0;
+        for (int i = 0; i < 8; i++) {
+            double t = seg * (i + 0.5);
+            double px = dx * t, py = oy + dy * t, pz = dz * t;
+            double h = Math.sqrt(px * px + py * py + pz * pz) - planetR;
+            odR += Math.exp(-h / 8000.0) * seg;
+            odM += Math.exp(-h / 1200.0) * seg;
+            odO += Math.max(0.0, 1.0 - Math.abs(h - 25000.0) / 15000.0) * seg;
+        }
+        for (int i = 0; i < 3; i++) {
+            out[i] = (float) Math.exp(-(rayBeta[i] * odR + mieBeta * odM + ozoneBeta[i] * odO));
+        }
     }
 
     public void destroy() {
