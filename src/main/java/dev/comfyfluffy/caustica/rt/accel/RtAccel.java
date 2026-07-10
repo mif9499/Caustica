@@ -149,7 +149,6 @@ public final class RtAccel {
         RtBuffer data;
         RtBuffer triangles;
         RtBuffer scratch;
-        final RtBufferPool pool;
         final long dataAddress;
         final long triangleArrayAddress;
         final int triangleCount;
@@ -159,14 +158,13 @@ public final class RtAccel {
 
         OpacityMicromap(VkDevice vk, long handle, RtBuffer backing, RtBuffer data, RtBuffer triangles,
                         RtBuffer scratch, long dataAddress, long triangleArrayAddress, int triangleCount,
-                        int subdivisionLevel, int bytesPerTriangle, RtBufferPool pool) {
+                        int subdivisionLevel, int bytesPerTriangle) {
             this.vk = vk;
             this.handle = handle;
             this.backing = backing;
             this.data = data;
             this.triangles = triangles;
             this.scratch = scratch;
-            this.pool = pool;
             this.dataAddress = dataAddress;
             this.triangleArrayAddress = triangleArrayAddress;
             this.triangleCount = triangleCount;
@@ -176,15 +174,15 @@ public final class RtAccel {
 
         void freeBuildInputs() {
             if (scratch != null) {
-                releaseOrDestroy(scratch);
+                scratch.destroy();
                 scratch = null;
             }
             if (triangles != null) {
-                releaseOrDestroy(triangles);
+                triangles.destroy();
                 triangles = null;
             }
             if (data != null) {
-                releaseOrDestroy(data);
+                data.destroy();
                 data = null;
             }
         }
@@ -197,16 +195,8 @@ public final class RtAccel {
                 vkDestroyMicromapEXT(vk, handle, null);
             }
             freeBuildInputs();
-            releaseOrDestroy(backing);
+            backing.destroy();
             destroyed = true;
-        }
-
-        private void releaseOrDestroy(RtBuffer buffer) {
-            if (pool != null) {
-                pool.release(buffer);
-            } else {
-                buffer.destroy();
-            }
         }
     }
 
@@ -353,7 +343,7 @@ public final class RtAccel {
         VkDevice vk = ctx.vk();
         String debugLabel = labelOr(label, "terrain BLAS");
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            OpacityMicromap opacityMicromap = prepareOpacityMicromap(ctx, null, opacityMicromapInput, debugLabel);
+            OpacityMicromap opacityMicromap = prepareOpacityMicromap(ctx, opacityMicromapInput, debugLabel);
             VkAccelerationStructureBuildSizesInfoKHR sizes = queryTerrainBlasSizes(vk, stack, positions, indices,
                     vertexCount, bucketTris, opacityMicromap);
             RtBuffer backing = ctx.createBuffer(sizes.accelerationStructureSize(), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false,
@@ -366,27 +356,7 @@ public final class RtAccel {
         }
     }
 
-    /** Pooled terrain BLAS allocation; the caller keeps {@link PreparedBlas#pooledBacking()} alive with the section. */
-    public static PreparedBlas prepareTerrainBlasPooled(RtContext ctx, RtBufferPool pool, RtBuffer positions, int vertexCount,
-                                                        RtBuffer indices, int[] bucketTris, OpacityMicromapInput opacityMicromapInput,
-                                                        String label) {
-        VkDevice vk = ctx.vk();
-        String debugLabel = labelOr(label, "pooled terrain BLAS");
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            OpacityMicromap opacityMicromap = prepareOpacityMicromap(ctx, pool, opacityMicromapInput, debugLabel);
-            VkAccelerationStructureBuildSizesInfoKHR sizes = queryTerrainBlasSizes(vk, stack, positions, indices,
-                    vertexCount, bucketTris, opacityMicromap);
-            RtBuffer backing = pool.acquire(ctx, sizes.accelerationStructureSize(), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false,
-                    debugLabel + " backing");
-            RtBuffer scratch = pool.acquire(ctx, sizes.buildScratchSize(), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
-                    debugLabel + " build scratch");
-            RtAccel accel = createBlasOn(ctx, stack, backing, sizes.accelerationStructureSize(), false, debugLabel, opacityMicromap);
-            return PreparedBlas.terrain(accel, scratch, backing, positions.deviceAddress, indices.deviceAddress, vertexCount - 1,
-                    bucketTris, opacityMicromap, debugLabel);
-        }
-    }
-
-    private static OpacityMicromap prepareOpacityMicromap(RtContext ctx, RtBufferPool pool, OpacityMicromapInput input,
+    private static OpacityMicromap prepareOpacityMicromap(RtContext ctx, OpacityMicromapInput input,
                                                           String blasLabel) {
         if (input == null || input.triangleCount() <= 0) {
             return null;
@@ -394,13 +364,13 @@ public final class RtAccel {
         VkDevice vk = ctx.vk();
         String label = blasLabel + " opacity micromap";
         int inputUsage = VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT;
-        RtBuffer data = createOrAcquire(ctx, pool, input.data().length + MICROMAP_INPUT_ADDRESS_ALIGNMENT - 1,
+        RtBuffer data = ctx.createBuffer(input.data().length + MICROMAP_INPUT_ADDRESS_ALIGNMENT - 1,
                 inputUsage, true, label + " data");
         long dataOffset = alignUp(data.deviceAddress, MICROMAP_INPUT_ADDRESS_ALIGNMENT) - data.deviceAddress;
         long dataAddress = data.deviceAddress + dataOffset;
         MemoryUtil.memByteBuffer(data.mapped + dataOffset, input.data().length).put(input.data());
         long triangleBytes = input.triangles().length;
-        RtBuffer triangles = createOrAcquire(ctx, pool, triangleBytes + MICROMAP_INPUT_ADDRESS_ALIGNMENT - 1, inputUsage, true,
+        RtBuffer triangles = ctx.createBuffer(triangleBytes + MICROMAP_INPUT_ADDRESS_ALIGNMENT - 1, inputUsage, true,
                 label + " triangles");
         long triangleOffset = alignUp(triangles.deviceAddress, MICROMAP_INPUT_ADDRESS_ALIGNMENT) - triangles.deviceAddress;
         long triangleArrayAddress = triangles.deviceAddress + triangleOffset;
@@ -412,7 +382,7 @@ public final class RtAccel {
             VkMicromapBuildSizesInfoEXT sizes = VkMicromapBuildSizesInfoEXT.calloc(stack).sType$Default();
             vkGetMicromapBuildSizesEXT(vk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, build, sizes);
 
-            RtBuffer backing = createOrAcquire(ctx, pool, sizes.micromapSize(), VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT, false,
+            RtBuffer backing = ctx.createBuffer(sizes.micromapSize(), VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT, false,
                     label + " backing");
             VkMicromapCreateInfoEXT ci = VkMicromapCreateInfoEXT.calloc(stack).sType$Default()
                     .buffer(backing.handle).offset(0).size(sizes.micromapSize()).type(VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT);
@@ -421,16 +391,11 @@ public final class RtAccel {
             long handle = pMicromap.get(0);
             RtDebugLabels.nameMicromap(ctx, handle, label);
 
-            RtBuffer scratch = createOrAcquire(ctx, pool, sizes.buildScratchSize(), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
+            RtBuffer scratch = ctx.createBuffer(sizes.buildScratchSize(), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
                     label + " build scratch");
             return new OpacityMicromap(vk, handle, backing, data, triangles, scratch,
-                    dataAddress, triangleArrayAddress, input.triangleCount(), input.subdivisionLevel(), input.bytesPerTriangle(), pool);
+                    dataAddress, triangleArrayAddress, input.triangleCount(), input.subdivisionLevel(), input.bytesPerTriangle());
         }
-    }
-
-    private static RtBuffer createOrAcquire(RtContext ctx, RtBufferPool pool, long size, int usage, boolean hostVisible,
-                                            String label) {
-        return pool != null ? pool.acquire(ctx, size, usage, hostVisible, label) : ctx.createBuffer(size, usage, hostVisible, label);
     }
 
     /**
