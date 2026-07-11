@@ -314,6 +314,13 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     float3 n = normalize(pr.normal.xyz);
     float3 tint = pr.tint.rgb;
 
+    // Water prims are single-sided, wound outward from the fluid volume (RtFluidMesher), so the
+    // UNFLIPPED geometric normal is a reliable "which side is water" signal: a ray travelling against
+    // it is entering the volume, one travelling with it is exiting. Captured before the toward-viewer
+    // flip below and carried in the payload so raygen can set inWater from hit orientation instead of
+    // toggling parity per crossing (a single missing/extra face no longer desyncs the rest of the path).
+    bool entering = dot(WorldRayDirection(), n) < 0.0;
+
     // Lever B: per-triangle corner UVs in primitive order. uvs[3*pid + k] is a contiguous,
     // directly-addressed load (no index buffer, no scattered vertex-UV gather), so it issues as soon as
     // pid is known and its latency overlaps the prim fetch instead of serialising behind an index load.
@@ -397,4 +404,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     }
     payload.f0 = f0;
     payloadSetPacked(payload, material, rough, metal, emission, sss);
+    if (material == MATERIAL_WATER && entering) {
+        payload.flags |= PAYLOAD_WATER_ENTERING;
+    }
 }

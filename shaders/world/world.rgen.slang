@@ -66,6 +66,9 @@ static const uint MATERIAL_PARTICLE = 2u;
 static const uint MATERIAL_GLASS = 3u;
 
 uint payloadMaterial() { return payload.flags & PAYLOAD_MATERIAL_MASK; }
+// Set by world.rchit only on a MATERIAL_WATER hit (see PAYLOAD_WATER_ENTERING) — whether the ray was
+// travelling into the water volume (vs. out of it) at this hit's face.
+bool payloadWaterEntering() { return (payload.flags & PAYLOAD_WATER_ENTERING) != 0u; }
 float payloadRoughness() { return unpackHalf2(payload.roughMetal).x; }
 float payloadMetalness() { return unpackHalf2(payload.roughMetal).y; }
 float payloadEmission() { return unpackHalf2(payload.emissionSss).x; }
@@ -679,10 +682,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
 
         // Water: smooth dielectric interface. Choose reflection or refraction stochastically by the
         // Fresnel reflectance F — sampling by F leaves the throughput unchanged (lossless interface), so
-        // there is no diffuse albedo multiply and no sun NEE here (the surface is specular). Medium
-        // tracking decides air->water vs water->air from the path state, not the hit geometry, so the
-        // duplicated FluidRenderer back-faces don't confuse the orientation; the normal `n` already
-        // faces the incoming ray. The bounce cap bounds stacked refractions.
+        // there is no diffuse albedo multiply and no sun NEE here (the surface is specular). On
+        // transmission, the new medium is read from this hit's face orientation (payloadWaterEntering),
+        // not toggled — see PAYLOAD_WATER_ENTERING. The bounce cap bounds stacked refractions.
         if (material == MATERIAL_WATER) {
             // Ripple the (near-flat) surface normal before any Fresnel/guide use → glints, broken
             // reflections, wobbling refraction. This water body's biome tint (carried in payload.albedo
@@ -718,7 +720,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             } else {
                 rd = refract(rd, n, etaI / etaT); // F < 1 here, so this is never total internal reflection
                 ro = hitPos - n * SURF_BIAS;       // transmitted ray crosses to the far side
-                inWater = !inWater;
+                // Derived from this hit's face orientation, not toggled — self-corrects instead of a
+                // stray/missing face corrupting the medium for the rest of the path (see PAYLOAD_WATER_ENTERING).
+                inWater = payloadWaterEntering();
             }
             // Specular interface (mirror reflect / clear refract): the continuation ray should see the
             // sun/moon disc directly — no NEE happened here to double-count it.

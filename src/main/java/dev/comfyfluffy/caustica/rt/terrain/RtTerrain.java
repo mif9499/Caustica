@@ -969,9 +969,9 @@ public final class RtTerrain {
                         continue;
                     }
                     // Fluids (water/lava, incl. waterlogged blocks): separate mesher, INVISIBLE render
-                    // shape, so handled independently of the block model below. FluidRenderer emits
-                    // section-local coords + atlas sprite UVs straight into the capturing consumer.
-                    // Lava's block light (15) rides the emission channel (water emits 0).
+                    // shape, so handled independently of the block model below. Emits section-local
+                    // coords + atlas sprite UVs straight into the capturing consumer. Lava's block light
+                    // (15) rides the emission channel (water emits 0).
                     FluidState fluid = state.getFluidState();
                     if (!fluid.isEmpty()) {
                         fluidCapture.emission = state.getLightEmission() / 15f;
@@ -979,7 +979,7 @@ public final class RtTerrain {
                         // so the path tracer can branch (see emitQuad).
                         fluidCapture.water = fluid.is(FluidTags.WATER);
                         try {
-                            fluidRenderer.tesselate(region, m, fluidCapture, state, fluid);
+                            RtFluidMesher.tesselate(region, m, fluidCapture, fluidRenderer.fluidModels, state, fluid);
                         } catch (Throwable t) {
                             warnMeshOnce("fluid", t); // skip a fluid whose meshing throws, don't fail the section
                         }
