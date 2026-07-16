@@ -990,10 +990,7 @@ public final class RtTerrain {
                         PreparedSection prepared = RtSectionBuilder.prepare(dispatch.ctx(), packed,
                                 cpu.opacityMicromap(), task.key, task.sox, task.soy, task.soz);
                         try {
-                            dispatch.ctx().gpuExecutor().submit(
-                                    cmd -> RtAccel.recordBlasBuilds(dispatch.ctx(), cmd, List.of(prepared.blas())),
-                                    () -> RtAccel.freeBlasScratch(List.of(prepared.blas())),
-                                    (build, failure) -> completeTask(task, prepared, build, failure));
+                            submitTerrainBuild(dispatch.ctx(), task, prepared);
                         } catch (Throwable t) {
                             RtSectionBuilder.destroy(prepared);
                             throw t;
@@ -1013,6 +1010,56 @@ public final class RtTerrain {
             inFlightDirtyGroup.put(key, dirtyGroup);
         } else {
             inFlightDirtyGroup.remove(key);
+        }
+    }
+
+    /** Build/query, then compact-copy a terrain BLAS before making it eligible for publication. */
+    private void submitTerrainBuild(RtContext ctx, SectionTask task, PreparedSection prepared) {
+        ctx.gpuExecutor().submit(
+                cmd -> RtAccel.recordBlasBuilds(ctx, cmd, List.of(prepared.blas())),
+                () -> RtAccel.freeBlasScratch(List.of(prepared.blas())),
+                (build, failure) -> {
+                    if (failure != null) {
+                        completeTask(task, prepared, build, failure);
+                        return;
+                    }
+                    submitTerrainCompaction(ctx, task, prepared, build);
+                });
+    }
+
+    private void submitTerrainCompaction(RtContext ctx, SectionTask task, PreparedSection prepared,
+                                         RtGpuExecutor.Build build) {
+        RtAccel.PreparedTerrainCompaction compaction;
+        try {
+            compaction = RtAccel.prepareTerrainCompaction(ctx, prepared.blas());
+        } catch (Throwable t) {
+            completeTask(task, prepared, build, t);
+            return;
+        }
+        try {
+            ctx.gpuExecutor().submit(
+                    cmd -> RtAccel.recordTerrainCompaction(ctx, cmd, compaction),
+                    () -> RtAccel.finishTerrainCompaction(compaction),
+                    (copyBuild, failure) -> {
+                        if (failure != null) {
+                            Throwable terminal = failure;
+                            try {
+                                RtAccel.destroyTerrainCompaction(compaction);
+                            } catch (Throwable destroyFailure) {
+                                terminal.addSuppressed(destroyFailure);
+                            }
+                            completeTask(task, prepared, copyBuild, terminal);
+                            return;
+                        }
+                        completeTask(task, prepared.withBlas(compaction.compacted()), copyBuild, null);
+                    });
+        } catch (Throwable t) {
+            try {
+                RtAccel.destroyTerrainCompaction(compaction);
+            } catch (Throwable destroyFailure) {
+                t.addSuppressed(destroyFailure);
+            }
+            completeTask(task, prepared, build, t);
         }
     }
 

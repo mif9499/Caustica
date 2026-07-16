@@ -79,5 +79,9 @@ final class RtSectionBuilder {
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
                            RtBuffer material, RtAccel.PreparedBlas blas, int[] triBase,
                            int sx, int sy, int sz) {
+        PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
+            return new PreparedSection(key, positions, indices, uvs, material, replacement,
+                    triBase, sx, sy, sz);
+        }
     }
 }
