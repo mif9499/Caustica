@@ -414,6 +414,7 @@ public final class RtComposite {
 
     public boolean composite(GpuTexture nativeColor, int width, int height) {
         frameCounter++; // global frame serial used by remaining per-frame/entity rings and diagnostics
+        VulkanDiagnostics.setInFlight("graphics-latest", "frame=" + frameCounter + " size=" + width + "x" + height);
         hdrWrittenThisFrame = false; // set true again below once this frame's HDR display image is written
         if (failed) {
             return false;

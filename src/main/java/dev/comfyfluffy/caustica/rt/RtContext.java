@@ -209,7 +209,8 @@ public final class RtContext {
             RtDebugLabels.nameBuffer(this, handle, label);
             VkBufferDeviceAddressInfo bdai = VkBufferDeviceAddressInfo.calloc(stack).sType$Default().buffer(handle);
             long address = VK12.vkGetBufferDeviceAddress(vk, bdai);
-            return new RtBuffer(vma, handle, allocation, address, hostVisible ? info.pMappedData() : 0L, size, usage, hostVisible);
+            return new RtBuffer(vma, handle, allocation, address, hostVisible ? info.pMappedData() : 0L,
+                    size, usage, hostVisible, label);
         } catch (Throwable t) {
             if (handle != 0L) {
                 Vma.vmaDestroyBuffer(vma, handle, allocation);
@@ -411,6 +412,9 @@ public final class RtContext {
 
     public static void check(int rc, String what) {
         if (rc != VK10.VK_SUCCESS) {
+            if (rc == VK10.VK_ERROR_DEVICE_LOST && instance != null) {
+                VulkanDiagnostics.reportDeviceLost(instance.device, what);
+            }
             throw new IllegalStateException(what + " failed: " + rc);
         }
     }
