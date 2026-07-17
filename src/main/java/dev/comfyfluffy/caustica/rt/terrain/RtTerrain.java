@@ -24,6 +24,7 @@ import it.unimi.dsi.fastutil.longs.LongIterator;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import it.unimi.dsi.fastutil.objects.ObjectIterator;
+import net.fabricmc.fabric.api.client.renderer.v1.sprite.SpriteFinder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.color.block.BlockColors;
 import net.minecraft.client.color.block.BlockTintSource;
@@ -34,13 +35,13 @@ import net.minecraft.client.renderer.block.BlockQuadOutput;
 import net.minecraft.client.renderer.block.BlockStateModelSet;
 import net.minecraft.client.renderer.block.FluidRenderer;
 import net.minecraft.client.renderer.block.FluidStateModelSet;
-import net.minecraft.client.renderer.block.ModelBlockRenderer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModel;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
+import net.minecraft.data.AtlasIds;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
@@ -69,8 +70,9 @@ import dev.comfyfluffy.caustica.rt.terrain.RtSectionTable.SectionGeom;
  * Residency follows vanilla because a section is only "desired" when its
  * chunk is loaded ({@code hasChunk}), so chunk load/unload drives build/free without any mixin.
  *
- * <p>Geometry comes from vanilla's {@link ModelBlockRenderer} (correct shapes, neighbour cull, biome
- * tint, alpha cutout). Vertices are section-local (f32-exact); each TLAS instance carries a
+ * <p>Geometry comes from the Fabric Renderer API model path (correct shapes, neighbour cull, biome
+ * tint, alpha cutout, and model quad transforms). Vertices are section-local (f32-exact); each TLAS
+ * instance carries a
  * translation {@code sectionOrigin − rebaseOrigin} (rebase = player block at the last rebuild, so
  * transforms stay small at any world coordinate) and an {@code instanceCustomIndex} into a BDA
  * section table ({@code {primAddr, uvAddr, triBase[4]}} per section) the hit shaders read. The index
@@ -780,7 +782,7 @@ public final class RtTerrain {
         Minecraft mc = Minecraft.getInstance();
         return new DispatchContext(ctx, level,
                 mc.getModelManager().getBlockStateModelSet(), mc.getModelManager().getFluidStateModelSet(),
-                mc.getBlockColors());
+                mc.getBlockColors(), mc.getAtlasManager().getAtlasOrThrow(AtlasIds.BLOCKS).spriteFinder());
     }
 
     /**
@@ -978,10 +980,10 @@ public final class RtTerrain {
             RtWorkerPool.INSTANCE.submit(() -> {
                 try {
                     WorkerTessState ws = WORKER_TESS.get(); // thread-confined; reset per task, arrays amortized
-                    ws.reset(dispatch.blockColors());
-                    ModelBlockRenderer renderer = new ModelBlockRenderer(false, true, dispatch.blockColors());
+                    ws.reset(dispatch.blockColors(), dispatch.blockSpriteFinder());
                     FluidRenderer fluidRenderer = new FluidRenderer(dispatch.fluidModelSet());
-                    CpuSection cpu = buildCpuSection(region, dispatch.modelSet(), renderer, ws.capture,
+                    CpuSection cpu = buildCpuSection(region, dispatch.modelSet(), ws.blockEmitter, ws.blockRandom,
+                            ws.capture,
                             fluidRenderer, ws.fluidCapture, ws.mesh, ws.pos, materialSnapshot, sx, sy, sz);
                     PackedSection packed = cpu.packed();
                     if (packed == null) {
@@ -1273,7 +1275,8 @@ public final class RtTerrain {
 
     /** Per-tick render-thread snapshot dependencies shared by reextract + missing dispatch. */
     private record DispatchContext(RtContext ctx, ClientLevel level, BlockStateModelSet modelSet,
-                                   FluidStateModelSet fluidModelSet, BlockColors blockColors) {
+                                   FluidStateModelSet fluidModelSet, BlockColors blockColors,
+                                   SpriteFinder blockSpriteFinder) {
     }
 
     private record DirtyEvent(long groupId, LongArrayList keys) {
