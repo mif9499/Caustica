@@ -240,6 +240,15 @@ public final class RtEntityCapture implements VertexConsumer {
         appendQuad(x, y, z, null, u, v, nx, ny, nz, color, uvRemap);
     }
 
+    /** Fail fast before a later submission can accidentally complete a malformed custom-geometry quad. */
+    void requireCompleteQuads(String label) {
+        if (n != 0) {
+            int incomplete = n;
+            n = 0;
+            throw new IllegalStateException(label + " left an incomplete quad (" + incomplete + " vertices)");
+        }
+    }
+
     /** Append a face whose positions reference a transformed eight-corner cube template. */
     void addIndexedDirectQuad(float[] x, float[] y, float[] z, int[] corners, float[] u, float[] v,
                               float nx, float ny, float nz, int color) {
