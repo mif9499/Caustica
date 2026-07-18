@@ -59,7 +59,7 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
-            Rt.Hdr.ENABLED, Rt.Bloom.ENABLED, Ngx.PATH,
+            Rt.Hdr.ENABLED, Rt.Bloom.ENABLED, Rt.Water.ABSORPTION_R, Rt.Water.Swamp.ABSORPTION_R, Ngx.PATH,
         };
     }
 
@@ -105,6 +105,11 @@ public final class CausticaConfig {
                         + " blurs them with iterative Kawase passes, and composites the glow back.\n"
                         + " intensity: bloom blend strength. threshold: luminance above which pixels bloom.\n"
                         + " knee: soft transition width below the threshold. blur-passes: Kawase iterations (0-6).");
+        FILE.setComment("water",
+                " Water absorption coefficients (per-channel per-metre extinction). Higher = darker / more\n"
+                        + " opaque; 0 = crystal clear. water.default.* applies to most biomes; water.swamp.*\n"
+                        + " overrides swamp and mangrove swamp. Further per-biome overrides are in\n"
+                        + " config/caustica_water_colors.json.");
     }
 
     private static Path resolveConfigPath() {
@@ -778,6 +783,49 @@ public final class CausticaConfig {
             /** Highlight headroom above paper white, in paper-white-referred units ({@code >= 1}). */
             public static float headroom() {
                 return Math.max(1.0f, PEAK_NITS.value() / Math.max(1.0f, PAPER_WHITE_NITS.value()));
+            }
+        }
+
+        /**
+         * Water absorption coefficients. Per-channel per-metre extinction for the Beer–Lambert
+         * volume: {@code exp(-absorption * distance)}. Higher values absorb light faster (darker /
+         * more opaque water); zero = crystal clear.
+         *
+         * <p>The top-level {@code ABSORPTION_*} settings are the defaults for all biomes except
+         * swamp. The {@link Swamp} sub-class provides separate overrides for swamp and mangrove
+         * swamp biomes. Additional per-biome overrides can be placed in
+         * {@code config/caustica_water_colors.json} and take precedence over both.
+         */
+        public static final class Water {
+            public static final FloatSetting ABSORPTION_R =
+                    clampedFloat("caustica.rt.waterAbsorptionR", "water.default.absorption-r", 0.04f, 0.0f, 1.0f);
+            public static final FloatSetting ABSORPTION_G =
+                    clampedFloat("caustica.rt.waterAbsorptionG", "water.default.absorption-g", 0.02f, 0.0f, 1.0f);
+            public static final FloatSetting ABSORPTION_B =
+                    clampedFloat("caustica.rt.waterAbsorptionB", "water.default.absorption-b", 0.008f, 0.0f, 1.0f);
+
+            private Water() {
+            }
+
+            public static float r() { return ABSORPTION_R.value(); }
+            public static float g() { return ABSORPTION_G.value(); }
+            public static float b() { return ABSORPTION_B.value(); }
+
+            /** Swamp biome water absorption overrides (swamp + mangrove swamp). */
+            public static final class Swamp {
+                public static final FloatSetting ABSORPTION_R =
+                        clampedFloat("caustica.rt.swampWaterAbsorptionR", "water.swamp.absorption-r", 0.02f, 0.0f, 1.0f);
+                public static final FloatSetting ABSORPTION_G =
+                        clampedFloat("caustica.rt.swampWaterAbsorptionG", "water.swamp.absorption-g", 0.02f, 0.0f, 1.0f);
+                public static final FloatSetting ABSORPTION_B =
+                        clampedFloat("caustica.rt.swampWaterAbsorptionB", "water.swamp.absorption-b", 0.06f, 0.0f, 1.0f);
+
+                private Swamp() {
+                }
+
+                public static float r() { return ABSORPTION_R.value(); }
+                public static float g() { return ABSORPTION_G.value(); }
+                public static float b() { return ABSORPTION_B.value(); }
             }
         }
 

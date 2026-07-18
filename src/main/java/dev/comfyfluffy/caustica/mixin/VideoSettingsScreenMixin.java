@@ -16,18 +16,6 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/**
- * Surfaces the runtime-tunable RT settings inside the vanilla Video Settings screen when the RT renderer is
- * enabled. Two changes, both gated on {@link CausticaConfig.Rt#ENABLED}:
- *
- * <ul>
- *   <li>The Quality section drops the vanilla options the path tracer supersedes (Ambient Occlusion and
- *       Entity Shadows are computed by RT global illumination / RT shadows).</li>
- *   <li>A trailing "Ray Tracing" section adds the {@link RtVideoOptions} controls.</li>
- * </ul>
- *
- * When RT is disabled the screen is left exactly as vanilla built it.
- */
 @Mixin(VideoSettingsScreen.class)
 public abstract class VideoSettingsScreenMixin {
     @Shadow
@@ -49,7 +37,6 @@ public abstract class VideoSettingsScreenMixin {
         }
         List<OptionInstance<?>> kept = new ArrayList<>(base.length);
         for (OptionInstance<?> option : base) {
-            // Path-traced GI + RT shadows make these vanilla raster controls inert under RT.
             if (option == options.ambientOcclusion() || option == options.entityShadows()) {
                 continue;
             }
@@ -69,11 +56,11 @@ public abstract class VideoSettingsScreenMixin {
         }
         list.addHeader(CAUSTICA$RT_HEADER);
         list.addSmall(RtVideoOptions.runtimeOptions());
+        RtVideoOptions.addWaterOptions(list);
     }
 
     @Inject(method = "removed", at = @At("TAIL"))
     private void caustica$saveConfig(CallbackInfo ci) {
-        // Persist any RT settings the player changed in this screen to the TOML config.
         CausticaConfig.save();
     }
 }

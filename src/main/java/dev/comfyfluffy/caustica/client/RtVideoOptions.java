@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Locale;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
+import net.minecraft.client.gui.components.OptionsList;
 import net.minecraft.network.chat.Component;
 
 /**
@@ -40,6 +41,7 @@ public final class RtVideoOptions {
             entities(),
             particles(),
             waterWaves(),
+            dlssRr(),
             dlssQuality(),
             hdrEnabled(),
             hdrPaperWhite(),
@@ -51,6 +53,39 @@ public final class RtVideoOptions {
             bloomSpread(),
             debugView(),
         };
+    }
+
+    /**
+     * Appends water absorption options — grouped under "Default Water" and "Swamp Water"
+     * sub-headers — to the given options list.
+     */
+    public static void addWaterOptions(OptionsList list) {
+        list.addHeader(Component.translatable("caustica.options.rt.water.default.header"));
+        list.addSmall(waterSlider(
+                CausticaConfig.Rt.Water.ABSORPTION_R, "caustica.options.rt.waterAbsorptionR"));
+        list.addSmall(waterSlider(
+                CausticaConfig.Rt.Water.ABSORPTION_G, "caustica.options.rt.waterAbsorptionG"));
+        list.addSmall(waterSlider(
+                CausticaConfig.Rt.Water.ABSORPTION_B, "caustica.options.rt.waterAbsorptionB"));
+
+        list.addHeader(Component.translatable("caustica.options.rt.water.swamp.header"));
+        list.addSmall(waterSlider(
+                CausticaConfig.Rt.Water.Swamp.ABSORPTION_R, "caustica.options.rt.swamp.absorptionR"));
+        list.addSmall(waterSlider(
+                CausticaConfig.Rt.Water.Swamp.ABSORPTION_G, "caustica.options.rt.swamp.absorptionG"));
+        list.addSmall(waterSlider(
+                CausticaConfig.Rt.Water.Swamp.ABSORPTION_B, "caustica.options.rt.swamp.absorptionB"));
+    }
+
+    private static OptionInstance<Integer> waterSlider(FloatSetting setting, String key) {
+        return new OptionInstance<>(
+            key,
+            OptionInstance.cachedConstantTooltip(Component.translatable(key + ".tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption,
+                    Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
+            percent -> setting.set(percent / 100.0f));
     }
 
     private static OptionInstance<String> exposureMode() {
@@ -127,6 +162,10 @@ public final class RtVideoOptions {
 
     private static OptionInstance<Boolean> waterWaves() {
         return bool("caustica.options.rt.waterWaves", CausticaConfig.Rt.Composite.WATER_WAVES);
+    }
+
+    private static OptionInstance<Boolean> dlssRr() {
+        return bool("caustica.options.rt.dlssRr", CausticaConfig.Rt.DlssRr.ENABLED);
     }
 
     // NVSDK_NGX_PerfQuality_Value, ordered performance -> quality for the slider. Per NVIDIA's DLSS-RR

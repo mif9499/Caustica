@@ -30,6 +30,9 @@
 	"caustica.options.rt.waterWaves": "Animated Water",
 	"caustica.options.rt.waterWaves.tooltip": "Animate water-surface normals for moving wave highlights.",
 
+	"caustica.options.rt.dlssRr": "DLSS Ray Reconstruction",
+	"caustica.options.rt.dlssRr.tooltip": "AI denoiser + upscaler. Off = raw noisy path trace with 1:1 blit. Toggle to compare noise vs. blur on transparent surfaces (water, glass).",
+
 	"caustica.options.rt.hdr": "HDR Output",
 	"caustica.options.rt.hdr.tooltip": "Present in HDR (ST.2084/PQ) instead of SDR, when the display supports it. Takes effect after restarting the game.",
 
@@ -56,6 +59,22 @@
 	"caustica.options.rt.bloomSpread": "Bloom Spread",
 	"caustica.options.rt.bloomSpread.tooltip": "Extra gaussian iterations on deep mip levels. Increases bloom radius naturally through multi-pass compounding without changing kernel shape.",
 
+	"caustica.options.rt.waterAbsorptionR": "Water Absorption R",
+	"caustica.options.rt.waterAbsorptionR.tooltip": "Water red-channel absorption per metre. Higher = red light absorbed faster = bluer water. 0 = crystal clear, 100% = ink.",
+	"caustica.options.rt.waterAbsorptionG": "Water Absorption G",
+	"caustica.options.rt.waterAbsorptionG.tooltip": "Water green-channel absorption per metre. Higher = green light absorbed faster = magentier water. 0 = crystal clear, 100% = ink.",
+	"caustica.options.rt.waterAbsorptionB": "Water Absorption B",
+	"caustica.options.rt.waterAbsorptionB.tooltip": "Water blue-channel absorption per metre. Higher = blue light absorbed faster = yellower/greener water. 0 = crystal clear, 100% = ink.",
+
+	"caustica.options.rt.water.default.header": "Water · Default",
+	"caustica.options.rt.water.swamp.header": "Water · Swamp",
+	"caustica.options.rt.swamp.absorptionR": "Water Absorption R",
+	"caustica.options.rt.swamp.absorptionR.tooltip": "Swamp water red-channel absorption per metre. Higher = red light absorbed faster. 0 = crystal clear, 100% = ink.",
+	"caustica.options.rt.swamp.absorptionG": "Water Absorption G",
+	"caustica.options.rt.swamp.absorptionG.tooltip": "Swamp water green-channel absorption per metre. Higher = green light absorbed faster. 0 = crystal clear, 100% = ink.",
+	"caustica.options.rt.swamp.absorptionB": "Water Absorption B",
+	"caustica.options.rt.swamp.absorptionB.tooltip": "Swamp water blue-channel absorption per metre. Higher = blue light absorbed faster = yellower/greener swamp water. 0 = crystal clear, 100% = ink.",
+
 	"caustica.options.rt.dlssQuality": "DLSS Quality",
 	"caustica.options.rt.dlssQuality.tooltip": "DLSS Ray Reconstruction quality mode. Lower-quality modes render fewer pixels and upscale more aggressively for higher framerates; higher-quality modes render more pixels for a sharper image. Only affects the image when DLSS Ray Reconstruction is enabled.",
 	"caustica.options.rt.dlssQuality.3": "Ultra Performance",
@@ -75,5 +94,8 @@
 	"caustica.options.rt.debugView.6": "Specular",
 	"caustica.options.rt.debugView.7": "Specular Motion",
 	"caustica.options.rt.debugView.8": "Emission Mask",
-	"caustica.options.rt.debugView.9": "Emission Source"
+	"caustica.options.rt.debugView.9": "Emission Source",
+
+	"caustica.options.rt.waterSettings": "Water Settings",
+	"caustica.options.rt.waterSettingsButton": "Water Settings…"
 }

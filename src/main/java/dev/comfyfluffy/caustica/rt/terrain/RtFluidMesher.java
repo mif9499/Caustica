@@ -1,6 +1,7 @@
 package dev.comfyfluffy.caustica.rt.terrain;
 
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import dev.comfyfluffy.caustica.rt.water.BiomeWaterColors;
 import net.minecraft.client.color.block.BlockTintSource;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.client.renderer.block.FluidModel;
@@ -10,6 +11,7 @@ import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluid;
@@ -130,6 +132,12 @@ final class RtFluidMesher {
         var builder = output.getBuilder(model.layer());
         BlockTintSource tintSource = model.tintSource();
         int tintColor = tintSource != null ? tintSource.colorInWorld(blockState, level, pos) : -1;
+        // Override water tint with Caustica's absorption config so the UI sliders (and any JSON
+        // per-biome overrides) also affect the water SURFACE colour, not just the camera-submerged
+        // fallback. Lava is left untouched.
+        if (fluidState.is(FluidTags.WATER)) {
+            tintColor = BiomeWaterColors.packResolved(pos);
+        }
         Fluid type = fluidState.getType();
         float heightSelf = getHeight(level, type, pos, blockState, fluidState);
         float heightNorthEast;

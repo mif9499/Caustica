@@ -109,14 +109,12 @@ static const float RAY_CONE_MIN_WIDTH = 1.0e-5;
 static const float RAY_CONE_DIFFUSE_SPREAD = 0.25;
 static const float RAY_CONE_GLOSSY_SPREAD_SCALE = 0.35;
 
-// Per-channel Beer–Lambert extinction from a water body's biome tint (carried in payload.albedo for
-// water hits, or worldPush.waterParams.xyz for the camera's own biome when starting submerged). A blue ocean
-// tint (low red) absorbs red fastest → bluer with depth; swamp green-brown shifts the hue. The floor
-// keeps even a white-tinted body very slightly absorbing so deep water never reads as clear vacuum.
-static const float WATER_DENSITY = 0.05;
-static const float3 WATER_ABSORB_FLOOR = float3(0.015, 0.010, 0.008);
+// Per-channel Beer–Lambert extinction. Since the Java side now packs extinction coefficients
+// directly into the water tint (via the BiomeColors mixin + BiomeWaterColors config), the tint
+// itself IS the extinction — no conversion needed. Kept as a trivial passthrough for documentation
+// and in case a future path still calls it.
 float3 waterExtinction(float3 tint) {
-    return WATER_ABSORB_FLOOR + WATER_DENSITY * (float3(1.0, 1.0, 1.0) - clamp(tint, 0.0, 1.0));
+    return tint;
 }
 
 // Animated surface waves — a directional wave spectrum, gradient-only (the surface stays geometrically

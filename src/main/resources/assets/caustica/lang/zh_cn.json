@@ -27,8 +27,27 @@
 	"caustica.options.rt.glow": "实体发光轮廓",
 	"caustica.options.rt.glow.tooltip": "为发光实体绘制原版发光效果轮廓（可穿墙显示）。",
 
+	"caustica.options.rt.waterAbsorptionR": "水体红吸收",
+	"caustica.options.rt.waterAbsorptionR.tooltip": "水体红光每米吸收率。越高红光吸收越快，水越蓝。0 = 水晶透彻，100% = 墨水。",
+	"caustica.options.rt.waterAbsorptionG": "水体绿吸收",
+	"caustica.options.rt.waterAbsorptionG.tooltip": "水体绿光每米吸收率。越高绿光吸收越快，水越品红。0 = 水晶透彻，100% = 墨水。",
+	"caustica.options.rt.waterAbsorptionB": "水体蓝吸收",
+	"caustica.options.rt.waterAbsorptionB.tooltip": "水体蓝光每米吸收率。越高蓝光吸收越快，水越黄绿。0 = 水晶透彻，100% = 墨水。",
+
+	"caustica.options.rt.water.default.header": "水体 · 默认",
+	"caustica.options.rt.water.swamp.header": "水体 · 沼泽",
+	"caustica.options.rt.swamp.absorptionR": "水体红吸收",
+	"caustica.options.rt.swamp.absorptionR.tooltip": "沼泽水体红光每米吸收率。越高红光吸收越快。0 = 水晶透彻，100% = 墨水。",
+	"caustica.options.rt.swamp.absorptionG": "水体绿吸收",
+	"caustica.options.rt.swamp.absorptionG.tooltip": "沼泽水体绿光每米吸收率。越高绿光吸收越快。0 = 水晶透彻，100% = 墨水。",
+	"caustica.options.rt.swamp.absorptionB": "水体蓝吸收",
+	"caustica.options.rt.swamp.absorptionB.tooltip": "沼泽水体蓝光每米吸收率。越高蓝光吸收越快，沼泽水越黄绿。0 = 水晶透彻，100% = 墨水。",
+
 	"caustica.options.rt.waterWaves": "动态水面",
 	"caustica.options.rt.waterWaves.tooltip": "对水面法线进行动画处理，以显示移动波浪高光。",
+
+	"caustica.options.rt.dlssRr": "DLSS 光线重建",
+	"caustica.options.rt.dlssRr.tooltip": "AI 降噪 + 超分。关闭 = 原始带噪路径追踪 + 1:1 拷贝。用于对比透明表面（水、玻璃）上的噪点 vs. 模糊。",
 
 	"caustica.options.rt.hdr": "HDR 输出",
 	"caustica.options.rt.hdr.tooltip": "当显示器支持时，以 HDR (ST.2084/PQ) 而不是 SDR 显示。重启游戏后生效。",
@@ -56,5 +75,8 @@
 	"caustica.options.rt.debugView.4": "粗糙度",
 	"caustica.options.rt.debugView.5": "运动",
 	"caustica.options.rt.debugView.6": "高光",
-	"caustica.options.rt.debugView.7": "高光运动"
+	"caustica.options.rt.debugView.7": "高光运动",
+
+	"caustica.options.rt.waterSettings": "水面设置",
+	"caustica.options.rt.waterSettingsButton": "水面设置…"
 }
