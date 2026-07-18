@@ -293,8 +293,8 @@ if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIg
 	selectedNgxNativePlatforms = requestedNgxPlatformsRaw.collect { ngxNativePlatformByName[it] }
 }
 
-def dlssSdkEnv = providers.environmentVariable("DLSS_SDK")
-def dlssSdkRootProvider = dlssSdkEnv.map { file(it) }
+	def dlssSdkEnv = providers.environmentVariable("DLSS_SDK")
+	def dlssSdkRootProvider = dlssSdkEnv.map { file(it.replace('"', '').replace("'", "").trim()) }
 
 def bundleNgxNatives = tasks.register("bundleNgxNatives") {
 	group = "build"

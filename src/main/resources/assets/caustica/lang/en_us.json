@@ -39,6 +39,23 @@
 	"caustica.options.rt.hdrPeak": "HDR Peak Brightness",
 	"caustica.options.rt.hdrPeak.tooltip": "Absolute brightness (in nits) highlights roll off toward. Set to your display's peak HDR brightness.",
 
+	"caustica.options.rt.bloom": "Bloom",
+	"caustica.options.rt.bloom.tooltip": "Adds a soft glow around bright light sources in the ray-traced image.",
+	"caustica.options.rt.bloomIntensity": "Bloom Intensity",
+	"caustica.options.rt.bloomIntensity.tooltip": "Strength of the bloom glow. 0 disables the visual effect without turning off the passes.",
+	"caustica.options.rt.bloomThreshold": "Bloom Threshold",
+	"caustica.options.rt.bloomThreshold.tooltip": "Luminance level (in paper-white units) above which pixels start to bloom. Lower values bloom more of the scene.",
+	"caustica.options.rt.bloomKnee": "Bloom Knee",
+	"caustica.options.rt.bloomKnee.tooltip": "Soft transition width below the threshold. Higher values create a smoother bloom falloff.",
+	"caustica.options.rt.bloomBlurPasses": "Bloom Blur Passes",
+	"caustica.options.rt.bloomBlurPasses.tooltip": "Number of extra Gaussian blur passes on the coarsest mip. More passes widen the bloom radius but cost more GPU time.",
+
+	"caustica.options.rt.bloomRadius": "Bloom Radius",
+	"caustica.options.rt.bloomRadius.tooltip": "Gaussian blur sigma multiplier. Higher values spread the bloom wider across the screen without increasing brightness.",
+
+	"caustica.options.rt.bloomSpread": "Bloom Spread",
+	"caustica.options.rt.bloomSpread.tooltip": "Extra gaussian iterations on deep mip levels. Increases bloom radius naturally through multi-pass compounding without changing kernel shape.",
+
 	"caustica.options.rt.dlssQuality": "DLSS Quality",
 	"caustica.options.rt.dlssQuality.tooltip": "DLSS Ray Reconstruction quality mode. Lower-quality modes render fewer pixels and upscale more aggressively for higher framerates; higher-quality modes render more pixels for a sharper image. Only affects the image when DLSS Ray Reconstruction is enabled.",
 	"caustica.options.rt.dlssQuality.3": "Ultra Performance",

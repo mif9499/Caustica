@@ -44,6 +44,11 @@ public final class RtVideoOptions {
             hdrEnabled(),
             hdrPaperWhite(),
             hdrPeak(),
+            bloomEnabled(),
+            bloomIntensity(),
+            bloomThreshold(),
+            bloomKnee(),
+            bloomSpread(),
             debugView(),
         };
     }
@@ -180,6 +185,57 @@ public final class RtVideoOptions {
             (caption, value) -> Component.translatable("caustica.options.rt.debugView." + value),
             new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), Codec.INT),
             Math.clamp(setting.value(), 0, 9),
+            setting::set);
+    }
+
+    private static OptionInstance<Boolean> bloomEnabled() {
+        return bool("caustica.options.rt.bloom", CausticaConfig.Rt.Bloom.ENABLED);
+    }
+
+    private static OptionInstance<Integer> bloomIntensity() {
+        FloatSetting setting = CausticaConfig.Rt.Bloom.INTENSITY;
+        return new OptionInstance<>(
+            "caustica.options.rt.bloomIntensity",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomIntensity.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption,
+                    Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 300),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 300),
+            percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Integer> bloomThreshold() {
+        FloatSetting setting = CausticaConfig.Rt.Bloom.THRESHOLD;
+        return new OptionInstance<>(
+            "caustica.options.rt.bloomThreshold",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomThreshold.tooltip")),
+            (caption, tenths) -> Options.genericValueLabel(caption,
+                    Component.literal(String.format(Locale.ROOT, "%.1f", tenths / 10.0f))),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 10.0f), 0, 100),
+            tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<Integer> bloomKnee() {
+        FloatSetting setting = CausticaConfig.Rt.Bloom.KNEE;
+        return new OptionInstance<>(
+            "caustica.options.rt.bloomKnee",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomKnee.tooltip")),
+            (caption, tenths) -> Options.genericValueLabel(caption,
+                    Component.literal(String.format(Locale.ROOT, "%.1f", tenths / 10.0f))),
+            new OptionInstance.IntRange(0, 20),
+            Math.clamp(Math.round(setting.value() * 10.0f), 0, 20),
+            tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<Integer> bloomSpread() {
+        IntSetting setting = CausticaConfig.Rt.Bloom.SPREAD;
+        return new OptionInstance<>(
+            "caustica.options.rt.bloomSpread",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomSpread.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, value),
+            new OptionInstance.IntRange(0, 3),
+            Math.clamp(setting.value(), 0, 3),
             setting::set);
     }
 

@@ -1,0 +1,44 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, rgba16f) uniform readonly image2D srcImage;
+layout(binding = 1, rgba16f) uniform writeonly image2D dstImage;
+
+// 4×4 binomial filter: [1,3,3,1] × [1,3,3,1]ᵀ / 256
+// Provides ~2.0 px Gaussian blur at source resolution per downsample,
+// substantially softer than 3×3. The cumulative 5-level pyramid gives
+// the wide, smooth glow games expect.
+const float W16 = 1.0 / 256.0;
+const float W48 = 3.0 / 256.0;
+const float W144 = 9.0 / 256.0;
+
+const float KERNEL[16] = float[16](
+    W16,  W48,  W48,  W16,
+    W48,  W144, W144, W48,
+    W48,  W144, W144, W48,
+    W16,  W48,  W48,  W16
+);
+
+void main() {
+    ivec2 outPix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outSize = imageSize(dstImage);
+    if (outPix.x >= outSize.x || outPix.y >= outSize.y) {
+        return;
+    }
+
+    // Each output pixel covers a 2×2 input block. The 4×4 filter window is
+    // centered on that block: top-left at (outPix*2 - 1, outPix*2 - 1).
+    ivec2 inBase = outPix * 2 - 1;
+    ivec2 srcSize = imageSize(srcImage);
+
+    vec4 sum = vec4(0.0);
+    for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+            ivec2 p = clamp(inBase + ivec2(dx, dy), ivec2(0), srcSize - ivec2(1));
+            sum += imageLoad(srcImage, p) * KERNEL[dy * 4 + dx];
+        }
+    }
+
+    imageStore(dstImage, outPix, sum);
+}

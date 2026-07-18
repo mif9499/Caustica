@@ -1,0 +1,40 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, rgba16f) uniform readonly image2D srcImage;
+layout(binding = 1, rgba16f) uniform writeonly image2D dstImage;
+
+// Fixed sigma=3.0, 9-tap kernel. Well-sampled → natural diffusion.
+// Multiple passes compound naturally: 2 passes ≈ sigma 4.2, 3 passes ≈ sigma 5.2.
+const float GAUSS[9] = float[9](
+    0.0477, 0.0835, 0.1246, 0.1584, 0.1716, 0.1584, 0.1246, 0.0835, 0.0477
+);
+const int RADIUS = 4;
+
+layout(push_constant) uniform Push {
+    int horizontal; // 1 = horizontal, 0 = vertical
+} pc;
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dstImage);
+    if (pix.x >= size.x || pix.y >= size.y) {
+        return;
+    }
+
+    vec4 sum = vec4(0.0);
+    if (pc.horizontal != 0) {
+        for (int i = -RADIUS; i <= RADIUS; i++) {
+            int sx = clamp(pix.x + i, 0, size.x - 1);
+            sum += imageLoad(srcImage, ivec2(sx, pix.y)) * GAUSS[i + RADIUS];
+        }
+    } else {
+        for (int i = -RADIUS; i <= RADIUS; i++) {
+            int sy = clamp(pix.y + i, 0, size.y - 1);
+            sum += imageLoad(srcImage, ivec2(pix.x, sy)) * GAUSS[i + RADIUS];
+        }
+    }
+
+    imageStore(dstImage, pix, sum);
+}

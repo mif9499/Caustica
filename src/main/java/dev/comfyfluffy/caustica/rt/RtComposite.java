@@ -60,6 +60,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtBloom;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
@@ -234,6 +235,7 @@ public final class RtComposite {
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
     private final RtExposure exposure = new RtExposure();
+    private final RtBloom bloom = new RtBloom();
 
     // Trace + guide buffers run at render res; composite (display-mapping) runs at display res.
     private int displayW = -1;
@@ -461,6 +463,7 @@ public final class RtComposite {
             // manual -> auto at runtime (video settings), the auto-mode histogram/state/pipeline must be
             // allocated before recordFrame's exposure.record() below needs them, or it throws.
             exposure.ensureResources(ctx);
+            bloom.ensureResources(ctx, width, height);
             refreshPipelineShapeIfNeeded(ctx);
             RtPipeline active = ensureWorld(ctx);
             if (materialEpochTraceGate) {
@@ -724,6 +727,7 @@ public final class RtComposite {
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         exposure.ensureResources(ctx);
+        bloom.ensureResources(ctx, width, height);
 
         mvHasPrev = false; // recreated images -> first MV frame is zero
         if (worldPipeline != null) {
@@ -915,6 +919,16 @@ public final class RtComposite {
                 }
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // rrOutput visible to exposure histogram
+
+            // Bloom: extract bright regions from the post-DLSS-RR HDR image, blur them, and composite
+            // back into rrOutput in-place — before exposure metering so bloom luminance is reflected
+            // in the auto-exposure histogram for a natural brightening around light sources.
+            if (CausticaConfig.Rt.Bloom.ENABLED.value()) {
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "bloom");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.bloom")) {
+                    bloom.record(ctx, cmd, stack, rrOutput.view, displayW, displayH);
+                }
+            }
 
             // Auto-exposure meters rrOutput (the post-RR, denoised/converged image), not the raw
             // pre-RR trace: RR has no notion of exposure (DLSS-RR Integration Guide §3.7 — ignore
@@ -1175,6 +1189,7 @@ public final class RtComposite {
         }
         destroyGuideImages();
         exposure.destroy();
+        bloom.destroy();
         if (displayPipeline != null) {
             displayPipeline.destroy();
             displayPipeline = null;

@@ -59,7 +59,7 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
-            Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.Hdr.ENABLED, Rt.Bloom.ENABLED, Ngx.PATH,
         };
     }
 
@@ -100,6 +100,11 @@ public final class CausticaConfig {
                 " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
                         + " drive the scene-HDR -> display mapping.");
+        FILE.setComment("bloom",
+                " Bloom post-processing. Extracts bright regions from the HDR image before tone mapping,\n"
+                        + " blurs them with iterative Kawase passes, and composites the glow back.\n"
+                        + " intensity: bloom blend strength. threshold: luminance above which pixels bloom.\n"
+                        + " knee: soft transition width below the threshold. blur-passes: Kawase iterations (0-6).");
     }
 
     private static Path resolveConfigPath() {
@@ -773,6 +778,41 @@ public final class CausticaConfig {
             /** Highlight headroom above paper white, in paper-white-referred units ({@code >= 1}). */
             public static float headroom() {
                 return Math.max(1.0f, PEAK_NITS.value() / Math.max(1.0f, PAPER_WHITE_NITS.value()));
+            }
+        }
+
+        /**
+         * Bloom post-processing. Adds a soft glow around bright light sources in the HDR image
+         * before tone mapping and exposure metering.
+         */
+        public static final class Bloom {
+            public static final BooleanSetting ENABLED = bool("caustica.rt.bloom", "bloom.enabled", false);
+            public static final FloatSetting INTENSITY =
+                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.7f, 0.0f, 3.0f);
+            public static final FloatSetting THRESHOLD =
+                    clampedFloat("caustica.rt.bloom.threshold", "bloom.threshold", 0.8f, 0.0f, 10.0f);
+            public static final FloatSetting KNEE =
+                    clampedFloat("caustica.rt.bloom.knee", "bloom.knee", 0.8f, 0.0f, 2.0f);
+            public static final IntSetting SPREAD =
+                    clampedInt("caustica.rt.bloom.spread", "bloom.spread", 0, 0, 3);
+
+            private Bloom() {
+            }
+
+            public static float intensity() {
+                return INTENSITY.value();
+            }
+
+            public static float threshold() {
+                return THRESHOLD.value();
+            }
+
+            public static float knee() {
+                return KNEE.value();
+            }
+
+            public static int spread() {
+                return SPREAD.value();
             }
         }
     }

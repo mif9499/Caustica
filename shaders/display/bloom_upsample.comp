@@ -1,0 +1,58 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, rgba16f) uniform image2D dstImage;           // larger image (read-modify-write)
+layout(binding = 1, rgba16f) uniform readonly image2D srcImage;  // smaller image
+
+layout(push_constant) uniform Push {
+    float intensity; // 1.0 for intermediate upsamples, user intensity for final composite
+} pc;
+
+// 3×3 binomial tent weights for filtered upsampling.
+const float TW[9] = float[9](
+    1.0/16.0, 2.0/16.0, 1.0/16.0,
+    2.0/16.0, 4.0/16.0, 2.0/16.0,
+    1.0/16.0, 2.0/16.0, 1.0/16.0
+);
+
+// Tent-filtered sample from srcImage at UV coordinates.
+vec3 sampleTent(ivec2 srcSize, vec2 uv) {
+    // Texel center in src space.
+    vec2 tc = uv * vec2(srcSize) - 0.5;
+    ivec2 base = ivec2(floor(tc));
+    vec2 frac = fract(tc);
+
+    // Sample 3×3 neighborhood with tent weights based on fractional offset.
+    vec3 result = vec3(0.0);
+    float totalWeight = 0.0;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 p = clamp(base + ivec2(dx, dy), ivec2(0), srcSize - ivec2(1));
+            // 1D tent weight: 1 - |offset| for offset in [-1,1]
+            float wt = (1.0 - abs(float(dx) - frac.x)) * (1.0 - abs(float(dy) - frac.y));
+            wt = max(wt, 0.0);
+            result += imageLoad(srcImage, p).rgb * wt;
+            totalWeight += wt;
+        }
+    }
+
+    return result / max(totalWeight, 1.0e-6);
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dstSize = imageSize(dstImage);
+    if (pix.x >= dstSize.x || pix.y >= dstSize.y) {
+        return;
+    }
+
+    ivec2 srcSize = imageSize(srcImage);
+    vec2 uv = (vec2(pix) + 0.5) / vec2(dstSize);
+
+    vec3 bloom = sampleTent(srcSize, uv);
+    vec3 hdr = imageLoad(dstImage, pix).rgb;
+
+    imageStore(dstImage, pix, vec4(hdr + bloom * pc.intensity, 1.0));
+}
