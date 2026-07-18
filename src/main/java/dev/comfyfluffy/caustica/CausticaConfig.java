@@ -786,15 +786,15 @@ public final class CausticaConfig {
          * before tone mapping and exposure metering.
          */
         public static final class Bloom {
-            public static final BooleanSetting ENABLED = bool("caustica.rt.bloom", "bloom.enabled", false);
+            public static final BooleanSetting ENABLED = bool("caustica.rt.bloom", "bloom.enabled", true);
             public static final FloatSetting INTENSITY =
-                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.7f, 0.0f, 3.0f);
+                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.2f, 0.0f, 3.0f);
             public static final FloatSetting THRESHOLD =
-                    clampedFloat("caustica.rt.bloom.threshold", "bloom.threshold", 0.8f, 0.0f, 10.0f);
+                    clampedFloat("caustica.rt.bloom.threshold", "bloom.threshold", 0.0f, 0.0f, 10.0f);
             public static final FloatSetting KNEE =
-                    clampedFloat("caustica.rt.bloom.knee", "bloom.knee", 0.8f, 0.0f, 2.0f);
+                    clampedFloat("caustica.rt.bloom.knee", "bloom.knee", 1.0f, 0.0f, 2.0f);
             public static final IntSetting SPREAD =
-                    clampedInt("caustica.rt.bloom.spread", "bloom.spread", 0, 0, 3);
+                    clampedInt("caustica.rt.bloom.spread", "bloom.spread", 3, 0, 3);
 
             private Bloom() {
             }
