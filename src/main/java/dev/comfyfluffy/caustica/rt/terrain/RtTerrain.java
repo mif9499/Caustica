@@ -50,7 +50,10 @@ import org.joml.Vector3fc;
 import org.lwjgl.system.MemoryUtil;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static dev.comfyfluffy.caustica.rt.terrain.RtTerrainMesher.WORKER_TESS;
@@ -154,6 +157,8 @@ public final class RtTerrain {
     private final ConcurrentLinkedQueue<SectionResult> completedBuilds = new ConcurrentLinkedQueue<>();
     private final Object activeTaskLock = new Object();
     private int activeTasks;
+    /** Invalidates all worker/GPU work from a detached world residency without joining it. */
+    private volatile long terrainEpoch = 1L;
     private long buildToken;
     private long dirtyGroupSeq;
     private final RtSectionTable table = new RtSectionTable();
@@ -163,6 +168,7 @@ public final class RtTerrain {
     // render-distance change, F3+A). Consumed in tick(), where the RT context is available.
     private volatile boolean fullClearRequested;
     private volatile boolean dirtyPending;
+    private boolean noWorldClearApplied;
     // Rebase origin (player block at the last TLAS rebuild) for the instance transforms + ray camOffset.
     public int blockX;
     public int blockY;
@@ -285,9 +291,13 @@ public final class RtTerrain {
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null || mc.player == null) {
-            clear(ctx, false); // left the world — drop all geometry (drains + frees, incl. any in-flight build)
+            if (!noWorldClearApplied) {
+                clear(ctx, false);
+                noWorldClearApplied = true;
+            }
             return;
         }
+        noWorldClearApplied = false;
         if (!RtMaterialRegistry.INSTANCE.isReady()) {
             return; // resource reload gap: keep old work dormant until the new epoch requests a full clear
         }
@@ -974,23 +984,36 @@ public final class RtTerrain {
         }
         RtMaterialRegistry.Snapshot materialSnapshot = RtMaterialRegistry.INSTANCE.requireSnapshot();
         SectionTask task = new SectionTask(key, token, sx << 4, sy << 4, sz << 4, dirtyGroup,
-                materialSnapshot.epoch());
+                terrainEpoch, materialSnapshot.epoch());
         beginActiveTask();
         try {
             RtWorkerPool.INSTANCE.submit(() -> {
                 try {
+                    if (!isTaskCurrent(task)) {
+                        completeTask(task, null, null, null);
+                        return;
+                    }
                     WorkerTessState ws = WORKER_TESS.get(); // thread-confined; reset per task, arrays amortized
                     ws.reset(dispatch.blockColors(), dispatch.blockSpriteFinder());
                     FluidRenderer fluidRenderer = new FluidRenderer(dispatch.fluidModelSet());
                     CpuSection cpu = buildCpuSection(region, dispatch.modelSet(), ws.blockEmitter, ws.blockRandom,
                             ws.capture,
                             fluidRenderer, ws.fluidCapture, ws.mesh, ws.pos, materialSnapshot, sx, sy, sz);
+                    if (!isTaskCurrent(task)) {
+                        completeTask(task, null, null, null);
+                        return;
+                    }
                     PackedSection packed = cpu.packed();
                     if (packed == null) {
                         completeTask(task, null, null, null);
                     } else {
                         PreparedSection prepared = RtSectionBuilder.prepare(dispatch.ctx(), packed,
                                 cpu.opacityMicromap(), task.key, task.sox, task.soy, task.soz);
+                        if (!isTaskCurrent(task)) {
+                            destroyPreparedSection(prepared);
+                            completeTask(task, null, null, null);
+                            return;
+                        }
                         try {
                             submitTerrainBuild(dispatch.ctx(), task, prepared);
                         } catch (Throwable t) {
@@ -1018,6 +1041,7 @@ public final class RtTerrain {
     /** Build/query, then compact-copy a terrain BLAS before making it eligible for publication. */
     private void submitTerrainBuild(RtContext ctx, SectionTask task, PreparedSection prepared) {
         ctx.gpuExecutor().submit(
+                () -> !isTaskCurrent(task),
                 cmd -> {
                     RtSectionBuilder.recordUpload(cmd, prepared);
                     RtAccel.recordBlasBuilds(ctx, cmd, List.of(prepared.blas()));
@@ -1029,6 +1053,10 @@ public final class RtTerrain {
                 (build, failure) -> {
                     if (failure != null) {
                         completeTask(task, prepared, build, failure);
+                        return;
+                    }
+                    if (!isTaskCurrent(task)) {
+                        completeTask(task, prepared, build, null);
                         return;
                     }
                     submitTerrainCompaction(ctx, task, prepared, build);
@@ -1046,6 +1074,7 @@ public final class RtTerrain {
         }
         try {
             ctx.gpuExecutor().submit(
+                    () -> !isTaskCurrent(task),
                     cmd -> RtAccel.recordTerrainCompaction(ctx, cmd, compaction),
                     () -> {
                         RtAccel.finishTerrainCompaction(compaction);
@@ -1080,10 +1109,18 @@ public final class RtTerrain {
 
     private void completeTask(SectionResult result) {
         try {
-            completedBuilds.add(result);
+            if (isTaskCurrent(result.task())) {
+                completedBuilds.add(result);
+            } else if (result.prepared() != null) {
+                destroyPreparedSection(result.prepared());
+            }
         } finally {
             finishActiveTask();
         }
+    }
+
+    private boolean isTaskCurrent(SectionTask task) {
+        return task.terrainEpoch == terrainEpoch;
     }
 
     private void beginActiveTask() {
@@ -1132,7 +1169,8 @@ public final class RtTerrain {
             SectionTask task = result.task();
             long expected = inFlight.get(task.key);
             boolean tokenValid = expected == task.token;
-            boolean valid = tokenValid && task.materialEpoch == RtMaterialRegistry.INSTANCE.epoch();
+            boolean valid = tokenValid && task.terrainEpoch == terrainEpoch
+                    && task.materialEpoch == RtMaterialRegistry.INSTANCE.epoch();
             if (!valid) {
                 if (tokenValid) {
                     inFlight.remove(task.key);
@@ -1306,14 +1344,17 @@ public final class RtTerrain {
         final int soy;
         final int soz;
         final long dirtyGroup;
+        final long terrainEpoch;
         final long materialEpoch;
-        SectionTask(long key, long token, int sox, int soy, int soz, long dirtyGroup, long materialEpoch) {
+        SectionTask(long key, long token, int sox, int soy, int soz, long dirtyGroup,
+                    long terrainEpoch, long materialEpoch) {
             this.key = key;
             this.token = token;
             this.sox = sox;
             this.soy = soy;
             this.soz = soz;
             this.dirtyGroup = dirtyGroup;
+            this.terrainEpoch = terrainEpoch;
             this.materialEpoch = materialEpoch;
         }
     }
@@ -1470,14 +1511,18 @@ public final class RtTerrain {
 
     /** Full teardown (world exit / shutdown): drain the GPU, then free everything incl. an in-flight build. */
     private void clear(RtContext ctx, boolean shutdown) {
+        if (!shutdown) {
+            clearAsync(ctx);
+            return;
+        }
+
+        // Device teardown is the one path that must prove every worker and GPU callback has relinquished
+        // its resources before the executor, allocator, and VkDevice disappear.
+        terrainEpoch++;
         drainTasksForClear(ctx);
         cancelAllDirtyGroups();
-        if (shutdown) {
-            ctx.waitIdle();
-            ctx.gpuExecutor().flushDestroysAfterDeviceIdle();
-        } else {
-            ctx.gpuExecutor().waitForLatestGraphicsAndFlush();
-        }
+        ctx.waitIdle();
+        ctx.gpuExecutor().flushDestroysAfterDeviceIdle();
         table.destroyRecycledGenerations();
         snapshots.clear();
         synchronized (dirtyLock) {
@@ -1507,11 +1552,7 @@ public final class RtTerrain {
             table.instanceList.clear();
             removed.clear();
             prepared.clear();
-            if (shutdown) {
-                ready = false;
-            } else {
-                ensureEmptyTableReady(ctx);
-            }
+            ready = false;
             return;
         }
         Generation currentGeneration = table.detachGeneration();
@@ -1537,13 +1578,116 @@ public final class RtTerrain {
         }
         removed.clear();
         for (PreparedSection ps : prepared) {
-            destroyPreparedSection(ps);
+            RtSectionBuilder.destroy(ps);
         }
         prepared.clear();
-        if (shutdown) {
-            ready = false;
-        } else {
-            ensureEmptyTableReady(ctx);
+        ready = false;
+    }
+
+    /**
+     * Invalidate a world residency without joining worker/GPU work or waiting for graphics. Render-owned
+     * state is detached immediately; its native resources are retired on the executor after the last
+     * graphics submission that could still reference them. Results arriving from the old epoch self-retire
+     * as unpublished resources in {@link #completeTask(SectionResult)}.
+     */
+    private void clearAsync(RtContext ctx) {
+        ctx.gpuExecutor().throwIfFailed();
+        terrainEpoch++;
+
+        // Token maps are render-thread ownership, so clearing them makes every old completion unpublishable
+        // even in the narrow race where it observed the previous epoch immediately before this increment.
+        inFlight.clear();
+        inFlightDirtyGroup.clear();
+        cancelAllDirtyGroups();
+
+        long lastGraphicsUse = ctx.gpuExecutor().latestGraphicsUseValue();
+        Generation oldGeneration = table.detachGeneration();
+
+        Set<SectionGeom> oldGeometry = Collections.newSetFromMap(new IdentityHashMap<>());
+        oldGeometry.addAll(resident.values());
+        oldGeometry.addAll(removed);
+        resident.clear();
+        removed.clear();
+
+        ArrayList<PreparedSection> oldPrepared = new ArrayList<>(prepared);
+        prepared.clear();
+        SectionResult completed;
+        while ((completed = completedBuilds.poll()) != null) {
+            if (completed.prepared() != null) {
+                oldPrepared.add(completed.prepared());
+            }
+        }
+
+        snapshots.clear();
+        synchronized (dirtyLock) {
+            dirty.clear();
+            dirtyEvents.clear();
+            dirtyPending = false;
+        }
+        dirtyDrain.clear();
+        dirtyEventDrain.clear();
+        desired.clear();
+        desiredColumns.clear();
+        loadedColumns.clear();
+        missing.clear();
+        missingIndex.clear();
+        queuedDirtyGroup.clear();
+        reextract.clear();
+        queuedReextract.clear();
+        empty.clear();
+        published.clear();
+        windowValid = false;
+
+        table.capacity = 0;
+        table.nextSlot = 0;
+        table.freeSlots.clear();
+        table.slots.clear();
+        table.instanceList.clear();
+        table.instances = null;
+
+        if (oldGeneration != null) {
+            retireGeneration(ctx, lastGraphicsUse, oldGeneration);
+        }
+        if (!oldGeometry.isEmpty()) {
+            ArrayList<SectionGeom> retirement = new ArrayList<>(oldGeometry);
+            ctx.gpuExecutor().enqueueDestroyAfterGraphics(lastGraphicsUse,
+                    () -> destroyDetachedGeometry(retirement));
+        }
+        if (!oldPrepared.isEmpty()) {
+            ctx.gpuExecutor().enqueueDestroyUnpublished(() -> destroyDetachedPrepared(oldPrepared));
+        }
+
+        // Keep the RT seam alive as an empty world while the new desired window begins filling.
+        ensureEmptyTableReady(ctx);
+    }
+
+    private static void destroyDetachedGeometry(List<SectionGeom> geometry) {
+        Throwable failure = null;
+        for (SectionGeom geom : geometry) {
+            try {
+                geom.destroy();
+            } catch (Throwable t) {
+                if (failure == null) failure = t;
+                else failure.addSuppressed(t);
+            }
+        }
+        if (failure != null) {
+            throw new RuntimeException("Failed to retire detached RT terrain geometry", failure);
+        }
+    }
+
+    private static void destroyDetachedPrepared(List<PreparedSection> sections) {
+        Throwable failure = null;
+        for (PreparedSection section : sections) {
+            try {
+                RtSectionBuilder.destroy(section);
+            } catch (Throwable t) {
+                if (failure == null) failure = t;
+                else failure.addSuppressed(t);
+            }
+        }
+        if (failure != null) {
+            throw new RuntimeException("Failed to retire detached RT terrain builds", failure);
         }
     }
 
