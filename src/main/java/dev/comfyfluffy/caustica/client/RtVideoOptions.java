@@ -54,7 +54,7 @@ public final class RtVideoOptions {
             bloomIntensity(),
             bloomThreshold(),
             bloomKnee(),
-            bloomSpread(),
+            bloomRadius(),
             debugView(),
         };
     }
@@ -295,8 +295,8 @@ public final class RtVideoOptions {
             (caption, percent) -> Options.genericValueLabel(caption,
                     Component.literal(percent + "%")),
             new OptionInstance.IntRange(0, 300),
-            Math.clamp(Math.round(setting.value() * 100.0f), 0, 300),
-            percent -> setting.set(percent / 100.0f));
+            Math.clamp(Math.round(setting.value() * 500.0f), 0, 300),
+            percent -> setting.set(percent / 500.0f));
     }
 
     private static OptionInstance<Integer> bloomThreshold() {
@@ -318,19 +318,19 @@ public final class RtVideoOptions {
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomKnee.tooltip")),
             (caption, tenths) -> Options.genericValueLabel(caption,
                     Component.literal(String.format(Locale.ROOT, "%.1f", tenths / 10.0f))),
-            new OptionInstance.IntRange(0, 20),
-            Math.clamp(Math.round(setting.value() * 10.0f), 0, 20),
+            new OptionInstance.IntRange(0, 60),
+            Math.clamp(Math.round(setting.value() * 10.0f), 0, 60),
             tenths -> setting.set(tenths / 10.0f));
     }
 
-    private static OptionInstance<Integer> bloomSpread() {
-        IntSetting setting = CausticaConfig.Rt.Bloom.SPREAD;
+    private static OptionInstance<Integer> bloomRadius() {
+        IntSetting setting = CausticaConfig.Rt.Bloom.RADIUS;
         return new OptionInstance<>(
-            "caustica.options.rt.bloomSpread",
-            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomSpread.tooltip")),
+            "caustica.options.rt.bloomRadius",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomRadius.tooltip")),
             (caption, value) -> Options.genericValueLabel(caption, value),
-            new OptionInstance.IntRange(0, 3),
-            Math.clamp(setting.value(), 0, 3),
+            new OptionInstance.IntRange(0, 6),
+            Math.clamp(setting.value(), 0, 6),
             setting::set);
     }
 

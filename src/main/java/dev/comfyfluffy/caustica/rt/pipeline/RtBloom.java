@@ -9,29 +9,36 @@ import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * Circular bloom via separable Gaussian blur on a 3-level pyramid.
+ * Dual-filtering bloom via a 6-level 13-tap tent-filtered pyramid.
  *
  * <pre>
- *   hdr → threshold → mip0(½) → gauss(H+V) → ds → mip1(¼) → gauss(H+V) → ds → mip2(⅛) → gauss(H+V)
- *                                                                                          │
- *   hdr ← final ← mip0 ← us ← mip1 ← us ← mip2 ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ┘
+ *   hdr ──[threshold + 13-tap tent ds]──▶ mip0(½) ──[13-tap tent ds]──▶ mip1(¼) ──▶ ... ──▶ mip5(¹⁄₆₄)
+ *                                                                                              │
+ *   hdr ◀──[final composite]── mip0 ◀──[tent us]── mip1 ◀── ... ◀── mip5 ◀────────────────────┘
  * </pre>
  *
- * Gaussian sigma = 3.0 (9-tap kernel) at each level, producing isotropic circular falloff.
- * The per-level blur + pyramid chain creates a natural multi-scale glow from tight (mip0)
- * to screen-wide (mip2 at ¹⁄₈ with cumulative ~55 display-pixel radius).
+ * The 13-tap tent downsampling filter provides Gaussian-quality blur at each step (σ≈2.5
+ * measured at the source resolution), eliminating the need for explicit separable-Gaussian
+ * blur passes. The threshold is applied per-pixel at full display resolution before the
+ * first downsample, preserving small light sources that a box-then-threshold approach
+ * would discard.
+ *
+ * Pyramid depth is controlled by {@link CausticaConfig.Rt.Bloom#radius()}: radius=0 only
+ * processes mip0 (tight 2-3 px glow), radius=5 processes all 6 mips (screen-wide bloom).
+ *
+ * @see <a href="https://www.iryoku.com/next-generation-post-processing-in-call-of-duty-advanced-warfare">
+ *      Next-Generation Post Processing in Call of Duty (Karis 2014)</a>
  */
 public final class RtBloom {
-    private static final int MIP_COUNT = 3; // mip0(½), mip1(¼), mip2(⅛)
+    private static final int MIP_COUNT = 6; // mip0(½), mip1(¼), mip2(⅛), mip3(¹⁄₁₆), mip4(¹⁄₃₂), mip5(¹⁄₆₄)
 
     private RtImage[] mips = new RtImage[MIP_COUNT];
-    private RtImage ping;     // temp buffer for gaussian (sized for largest mip = ½ display)
     private RtBloomPipeline pipeline;
     private int lastDisplayW = -1;
     private int lastDisplayH = -1;
 
     public boolean ready() {
-        return pipeline != null && mips[0] != null && ping != null;
+        return pipeline != null && mips[0] != null;
     }
 
     public void ensureResources(RtContext ctx, int displayW, int displayH) {
@@ -50,21 +57,9 @@ public final class RtBloom {
             mips[i] = ctx.createStorageImage(w, h, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     "bloom mip" + i + " " + w + "x" + h);
         }
-        ping = ctx.createStorageImage(mips[0].width, mips[0].height,
-                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "bloom gauss ping " + mips[0].width + "x" + mips[0].height);
         pipeline = RtBloomPipeline.create(ctx);
         lastDisplayW = displayW;
         lastDisplayH = displayH;
-    }
-
-    /** Run separable Gaussian (H + V) on a mip image, using ping as temp. */
-    private void gaussian(VkCommandBuffer cmd, MemoryStack stack, int w, int h, long mipView) {
-        pipeline.setBlurImages(mipView, ping.view);
-        pipeline.dispatchBlur(cmd, w, h, true);  // horizontal
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-        pipeline.setBlurImages(ping.view, mipView);
-        pipeline.dispatchBlur(cmd, w, h, false); // vertical
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
     }
 
     public void record(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack,
@@ -74,44 +69,27 @@ public final class RtBloom {
         float threshold = CausticaConfig.Rt.Bloom.threshold();
         float knee = CausticaConfig.Rt.Bloom.knee();
         float intensity = CausticaConfig.Rt.Bloom.intensity();
-        int spread = CausticaConfig.Rt.Bloom.spread();
+        int radius = CausticaConfig.Rt.Bloom.radius();
 
-        // 1. Threshold + 2×2 downsample: hdr → mip0
+        // 1. Combined threshold + downsample: hdr → mip0 (full-res threshold, 13-tap tent ds)
         pipeline.setThresholdImages(hdrView, mips[0].view);
         pipeline.dispatchThreshold(cmd, displayW, displayH, threshold, knee);
         VulkanCommandEncoder.memoryBarrier(cmd, stack);
 
-        // Per-level: gaussian blur + downsample.
-        // Spread adds extra gaussian iterations on deeper mips (mip1, mip2) to widen
-        // the bloom naturally through multi-pass compounding at fixed sigma=3.0.
-        for (int i = 0; i < MIP_COUNT; i++) {
-            RtImage mip = mips[i];
-            gaussian(cmd, stack, mip.width, mip.height, mip.view);
-
-            // Extra blur on this mip based on spread:
-            // spread=1 → 1 extra on mip2 only
-            // spread=2 → 1 extra on mip1 + mip2
-            // spread=3 → 2 extra on mip2, 1 extra on mip1
-            int extra = 0;
-            if (i == MIP_COUNT - 1) {
-                extra = spread;           // mip2: spread passes extra
-            } else if (i == MIP_COUNT - 2) {
-                extra = Math.max(0, spread - 1); // mip1: spread-1 passes extra
-            }
-            for (int p = 0; p < extra; p++) {
-                gaussian(cmd, stack, mip.width, mip.height, mip.view);
-            }
-
-            if (i < MIP_COUNT - 1) {
-                RtImage next = mips[i + 1];
-                pipeline.setDownsampleImages(mip.view, next.view);
-                pipeline.dispatchDownsample(cmd, mip.width, mip.height);
-                VulkanCommandEncoder.memoryBarrier(cmd, stack);
-            }
+        // 2. Downsample chain: mip0 → mip1 → ... → mip[radius]
+        //    radius controls how deep we go — beyond the last level the pyramid is shallow.
+        int activeLevels = Math.max(1, Math.min(radius + 1, MIP_COUNT));
+        for (int i = 1; i < activeLevels; i++) {
+            RtImage src = mips[i - 1];
+            RtImage dst = mips[i];
+            pipeline.setDownsampleImages(src.view, dst.view);
+            pipeline.dispatchDownsample(cmd, src.width, src.height);
+            VulkanCommandEncoder.memoryBarrier(cmd, stack);
         }
 
-        // Upsample chain (energy-preserving, intensity=1.0)
-        for (int i = MIP_COUNT - 1; i > 0; i--) {
+        // 3. Upsample chain: mip[N-1] → mip[N-2] → ... → mip0
+        //    Intermediate upsamples use intensity=1.0 (additive merge, no scaling).
+        for (int i = activeLevels - 1; i > 0; i--) {
             RtImage dst = mips[i - 1];
             RtImage src = mips[i];
             pipeline.setUpsampleImages(dst.view, src.view);
@@ -119,7 +97,7 @@ public final class RtBloom {
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
         }
 
-        // Final composite: mip0 → HDR
+        // 4. Final composite: mip0 → HDR (× user intensity)
         pipeline.setUpsampleImages(hdrView, mips[0].view);
         pipeline.dispatchUpsample(cmd, displayW, displayH, intensity);
         VulkanCommandEncoder.memoryBarrier(cmd, stack);
@@ -130,7 +108,6 @@ public final class RtBloom {
         for (int i = 0; i < mips.length; i++) {
             if (mips[i] != null) { mips[i].destroy(); mips[i] = null; }
         }
-        if (ping != null) { ping.destroy(); ping = null; }
         lastDisplayW = -1;
         lastDisplayH = -1;
     }

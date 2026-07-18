@@ -28,9 +28,20 @@
 	"caustica.options.rt.glow.tooltip": "為發光實體繪製原版發光效果輪廓（可穿牆顯示）。",
 
 	"caustica.options.rt.waterWaves": "動態水面",
-	"caustica.options.rt.waterWaves.tooltip": "對水面法線進行動畫處理，以顯示移動波浪高光。",
+		"caustica.options.rt.waterWaves.tooltip": "對水面法線進行動畫處理，以顯示移動波浪高光。",
 
-	"caustica.options.rt.hdr": "HDR 輸出",
+		"caustica.options.rt.bloom": "泛光",
+		"caustica.options.rt.bloom.tooltip": "為光線追蹤影像中的明亮光源添加柔和光暈。",
+		"caustica.options.rt.bloomIntensity": "泛光強度",
+		"caustica.options.rt.bloomIntensity.tooltip": "泛光光暈的強度。設為 0 可在不停用通道的情況下關閉視覺效果。",
+		"caustica.options.rt.bloomThreshold": "泛光閾值",
+		"caustica.options.rt.bloomThreshold.tooltip": "像素開始泛光的亮度級別（以紙白為單位）。較低的值會使更多場景產生泛光。",
+		"caustica.options.rt.bloomKnee": "泛光過渡",
+		"caustica.options.rt.bloomKnee.tooltip": "軟閾值過渡的對數寬度（以檔位為單位）。0 = 硬截斷，6 = 非常平緩的過渡。1 檔 = 亮度翻倍，符合人眼感知。",
+		"caustica.options.rt.bloomRadius": "泛光半徑",
+		"caustica.options.rt.bloomRadius.tooltip": "控制泛光金字塔的深度。0 = 緊緻光暈，6 = 全螢幕擴散。每增加一級就增加一層更寬的柔和光暈。",
+
+		"caustica.options.rt.hdr": "HDR 輸出",
 	"caustica.options.rt.hdr.tooltip": "當顯示器支援時，以 HDR (ST.2084/PQ) 而不是 SDR 顯示。重新啟動遊戲後生效。",
 
 	"caustica.options.rt.hdrPaperWhite": "HDR 紙白亮度",

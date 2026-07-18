@@ -49,15 +49,9 @@
 	"caustica.options.rt.bloomThreshold": "Bloom Threshold",
 	"caustica.options.rt.bloomThreshold.tooltip": "Luminance level (in paper-white units) above which pixels start to bloom. Lower values bloom more of the scene.",
 	"caustica.options.rt.bloomKnee": "Bloom Knee",
-	"caustica.options.rt.bloomKnee.tooltip": "Soft transition width below the threshold. Higher values create a smoother bloom falloff.",
-	"caustica.options.rt.bloomBlurPasses": "Bloom Blur Passes",
-	"caustica.options.rt.bloomBlurPasses.tooltip": "Number of extra Gaussian blur passes on the coarsest mip. More passes widen the bloom radius but cost more GPU time.",
-
-	"caustica.options.rt.bloomRadius": "Bloom Radius",
-	"caustica.options.rt.bloomRadius.tooltip": "Gaussian blur sigma multiplier. Higher values spread the bloom wider across the screen without increasing brightness.",
-
-	"caustica.options.rt.bloomSpread": "Bloom Spread",
-	"caustica.options.rt.bloomSpread.tooltip": "Extra gaussian iterations on deep mip levels. Increases bloom radius naturally through multi-pass compounding without changing kernel shape.",
+		"caustica.options.rt.bloomKnee.tooltip": "Log2 stop width of the soft threshold transition. 0 = hard step, 6 = very gradual shoulder. Works in perceptually uniform stops (1 stop = 2× luminance).",
+		"caustica.options.rt.bloomRadius": "Bloom Radius",
+		"caustica.options.rt.bloomRadius.tooltip": "Controls the depth of the bloom pyramid (0=tight, 6=screen-wide diffusion). Each level adds a wider, softer glow tier with 13-tap tent-filtered blur.",
 
 	"caustica.options.rt.waterAbsorptionR": "Water Absorption R",
 	"caustica.options.rt.waterAbsorptionR.tooltip": "Water red-channel absorption per metre. Higher = red light absorbed faster = bluer water. 0 = crystal clear, 100% = ink.",

@@ -1,44 +1,59 @@
 #version 460
 
+// 9-tap (5×5 diamond) tent-filtered 2× upsample with additive composite.
+//
+// For each dst pixel the shader reconstructs the sub-texel source UV, then samples a
+// 5×5 diamond (radius 2) around it with tent falloff. The tent provides smooth, low-aliasing
+// upsampling that reduces the blockiness / flicker typical of simpler 3×3 tents.
+//
+// Composite mode: dst = dst + filtered_sample(src) × intensity
+// Intermediate pyramid merges use intensity=1.0; the final HDR composite uses the
+// user-configured bloom intensity.
+
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(binding = 0, rgba16f) uniform image2D dstImage;           // larger image (read-modify-write)
-layout(binding = 1, rgba16f) uniform readonly image2D srcImage;  // smaller image
+layout(binding = 0, rgba16f) uniform image2D dstImage;           // larger (read-modify-write)
+layout(binding = 1, rgba16f) uniform readonly image2D srcImage;  // smaller
 
 layout(push_constant) uniform Push {
-    float intensity; // 1.0 for intermediate upsamples, user intensity for final composite
+    float intensity; // 1.0 for intermediate upsamples, user value for final composite
 } pc;
 
-// 3×3 binomial tent weights for filtered upsampling.
-const float TW[9] = float[9](
-    1.0/16.0, 2.0/16.0, 1.0/16.0,
-    2.0/16.0, 4.0/16.0, 2.0/16.0,
-    1.0/16.0, 2.0/16.0, 1.0/16.0
-);
+// 9-tap 5×5 diamond tent weight (radius 2).
+float tentWeight(int dx, int dy) {
+    return max(0.0, 1.0 - abs(float(dx)) / 3.0) * max(0.0, 1.0 - abs(float(dy)) / 3.0);
+}
 
-// Tent-filtered sample from srcImage at UV coordinates.
+// Tent-filtered sample from srcImage at sub-texel UV coordinates.
 vec3 sampleTent(ivec2 srcSize, vec2 uv) {
     // Texel center in src space.
     vec2 tc = uv * vec2(srcSize) - 0.5;
     ivec2 base = ivec2(floor(tc));
     vec2 frac = fract(tc);
 
-    // Sample 3×3 neighborhood with tent weights based on fractional offset.
     vec3 result = vec3(0.0);
-    float totalWeight = 0.0;
+    float totalW = 0.0;
 
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
+    // 5×5 diamond with tent weights, modulated by fractional offset.
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            float w = tentWeight(dx, dy);
+            if (w <= 0.0) continue;
+
             ivec2 p = clamp(base + ivec2(dx, dy), ivec2(0), srcSize - ivec2(1));
-            // 1D tent weight: 1 - |offset| for offset in [-1,1]
-            float wt = (1.0 - abs(float(dx) - frac.x)) * (1.0 - abs(float(dy) - frac.y));
-            wt = max(wt, 0.0);
+
+            // Modulate tent weight by sub-texel offset for smooth interpolation.
+            // Use 1D tent: 1 - |offset - samplePos| for offset in [-1, 1].
+            float wx = 1.0 - abs(float(dx) - frac.x);
+            float wy = 1.0 - abs(float(dy) - frac.y);
+            float wt = max(wx, 0.0) * max(wy, 0.0) * w;
+
             result += imageLoad(srcImage, p).rgb * wt;
-            totalWeight += wt;
+            totalW += wt;
         }
     }
 
-    return result / max(totalWeight, 1.0e-6);
+    return result / max(totalW, 1.0e-6);
 }
 
 void main() {

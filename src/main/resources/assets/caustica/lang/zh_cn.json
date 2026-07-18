@@ -41,9 +41,20 @@
 	"caustica.options.rt.swamp.absorptionG": "水体绿吸收",
 	"caustica.options.rt.swamp.absorptionG.tooltip": "沼泽水体绿光每米吸收率。越高绿光吸收越快。0 = 水晶透彻，100% = 墨水。",
 	"caustica.options.rt.swamp.absorptionB": "水体蓝吸收",
-	"caustica.options.rt.swamp.absorptionB.tooltip": "沼泽水体蓝光每米吸收率。越高蓝光吸收越快，沼泽水越黄绿。0 = 水晶透彻，100% = 墨水。",
+		"caustica.options.rt.swamp.absorptionB.tooltip": "沼泽水体蓝光每米吸收率。越高蓝光吸收越快，沼泽水越黄绿。0 = 水晶透彻，100% = 墨水。",
 
-	"caustica.options.rt.waterWaves": "动态水面",
+		"caustica.options.rt.bloom": "泛光",
+		"caustica.options.rt.bloom.tooltip": "为光线追踪图像中的明亮光源添加柔和光晕。",
+		"caustica.options.rt.bloomIntensity": "泛光强度",
+		"caustica.options.rt.bloomIntensity.tooltip": "泛光光晕的强度。设为 0 可在不停用通道的情况下关闭视觉效果。",
+		"caustica.options.rt.bloomThreshold": "泛光阈值",
+		"caustica.options.rt.bloomThreshold.tooltip": "像素开始泛光的亮度级别（以纸白为单位）。较低的值会使更多场景产生泛光。",
+		"caustica.options.rt.bloomKnee": "泛光过渡",
+		"caustica.options.rt.bloomKnee.tooltip": "软阈值过渡的对数宽度（以档位为单位）。0 = 硬截断，6 = 非常平缓的过渡。1 档 = 亮度翻倍，符合人眼感知。",
+		"caustica.options.rt.bloomRadius": "泛光半径",
+		"caustica.options.rt.bloomRadius.tooltip": "控制泛光金字塔的深度。0 = 紧致光晕，6 = 全屏扩散。每增加一级就增加一层更宽的柔和光晕。",
+
+		"caustica.options.rt.waterWaves": "动态水面",
 	"caustica.options.rt.waterWaves.tooltip": "对水面法线进行动画处理，以显示移动波浪高光。",
 
 	"caustica.options.rt.dlssRr": "DLSS 光线重建",

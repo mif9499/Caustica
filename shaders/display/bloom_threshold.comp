@@ -1,18 +1,64 @@
 #version 460
 
+// Combined full-resolution threshold extraction + 13-tap tent-filtered downsample to half res.
+//
+// Architecture:
+//   For each output pixel at ½ resolution, we sample a 5×5 diamond (13 taps) around the
+//   geometric centre of the corresponding 2×2 block in the full-res HDR input. Each of the
+//   13 source pixels is individually thresholded with a soft knee, then weighted by a tent
+//   falloff measured from the block centre (2*ox+0.5, 2*oy+0.5) — not from an integer anchor.
+//   This preserves point light sources and keeps the bloom centred on the source.
+//
+// Thresholding uses a log2-space smoothstep so that the knee parameter works in perceptually
+// uniform stops (1 stop = 2× luminance).  When threshold > 0 the knee softens the transition
+// around the threshold; when threshold = 0 the knee controls a global rolloff from very-dark
+// to bright, giving the user a meaningful "hard ⇄ soft" control even in global-diffusion mode.
+//
+// The 13-tap tent provides ~σ=2.5 worth of Gaussian-quality blur in the same pass that
+// halves the resolution, eliminating the need for a separate Gaussian blur stage.
+//
+// Reference: "Next-Generation Post Processing in Call of Duty: Advanced Warfare" (Karis 2014)
+
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 layout(binding = 0, rgba16f) uniform readonly image2D hdrInput;   // display-res HDR
-layout(binding = 1, rgba16f) uniform writeonly image2D bloomHalf; // 1/2 res output
+layout(binding = 1, rgba16f) uniform writeonly image2D bloomHalf; // ½ res output
 
 layout(push_constant) uniform Push {
     float threshold;
-    float knee;
+    float knee;      // log2 stops: 0 = hard step, 6 = muilti-stop gradual shoulder
 } pc;
+
+// ---- helpers ----
 
 float luminance(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
+
+// Log2-space soft knee.
+//   threshold > 0: knee softens the transition around the threshold in stops.
+//   threshold = 0: knee controls a global shoulder from very-dark to bright.
+float softKnee(float luma) {
+    float logLuma = log2(max(luma, 1e-10));
+
+    if (pc.threshold > 0.0) {
+        float logThresh = log2(pc.threshold);
+        return smoothstep(logThresh - pc.knee, logThresh + pc.knee, logLuma);
+    } else {
+        // Anchor the shoulder at −8 stops (2^−8 ≈ 0.004 — below perceptible content).
+        // knee=0 → hard step at −8, everything blooms equally.
+        // knee=6 → smooth shoulder spanning 12 stops, visible dark ⇄ bright control.
+        return smoothstep(-8.0 - pc.knee, -8.0 + pc.knee, logLuma);
+    }
+}
+
+// Tent weight for a sample whose centre is at (px, py) when the filter is centred at
+// (blockCentreX, blockCentreY).  Radius = 3 source pixels.
+float tentWeight(float px, float py, float cx, float cy) {
+    return max(0.0, 1.0 - abs(px - cx) / 3.0) * max(0.0, 1.0 - abs(py - cy) / 3.0);
+}
+
+// ----
 
 void main() {
     ivec2 outPix = ivec2(gl_GlobalInvocationID.xy);
@@ -21,16 +67,30 @@ void main() {
         return;
     }
 
-    ivec2 inBase = outPix * 2;
-    vec3 avg = (imageLoad(hdrInput, inBase + ivec2(0, 0)).rgb
-              + imageLoad(hdrInput, inBase + ivec2(1, 0)).rgb
-              + imageLoad(hdrInput, inBase + ivec2(0, 1)).rgb
-              + imageLoad(hdrInput, inBase + ivec2(1, 1)).rgb) * 0.25;
+    ivec2 srcSize = imageSize(hdrInput);
 
-    float luma = luminance(avg);
-    float t = smoothstep(pc.threshold - pc.knee, pc.threshold + pc.knee, luma);
-    float bloomLuma = t * max(luma - pc.threshold, 0.0);
-    vec3 bloom = avg * (bloomLuma / max(luma, 1.0e-6));
+    // Geometric centre of the 2×2 input block.
+    vec2 blockCentre = vec2(outPix * 2) + 0.5;
 
+    vec3 bloom = vec3(0.0);
+    float totalW = 0.0;
+
+    // 13-tap diamond: 5×5 window centred on the block centre, corners excluded by tent.
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            ivec2 p = clamp(outPix * 2 + ivec2(dx, dy) + 1, ivec2(0), srcSize - ivec2(1));
+
+            float w = tentWeight(float(p.x), float(p.y), blockCentre.x, blockCentre.y);
+            if (w <= 0.0) continue;
+
+            vec3 hdr = imageLoad(hdrInput, p).rgb;
+            float t = softKnee(luminance(hdr));
+
+            bloom += hdr * t * w;
+            totalW += w;
+        }
+    }
+
+    bloom /= max(totalW, 1.0e-6);
     imageStore(bloomHalf, outPix, vec4(bloom, 1.0));
 }

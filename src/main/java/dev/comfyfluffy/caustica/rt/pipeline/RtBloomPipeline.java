@@ -29,8 +29,8 @@ import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import static dev.comfyfluffy.caustica.rt.RtContext.check;
 
 /**
- * Multi-pass bloom compute pipelines: threshold, downsample (pyramid), Kawase blur,
- * and upsample-composite (used for both intermediate pyramid and final HDR composite).
+ * Multi-pass bloom compute pipelines: threshold+downsample, downsample (pyramid), and
+ * upsample-composite (used for both intermediate pyramid merges and the final HDR composite).
  */
 public final class RtBloomPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
@@ -55,15 +55,6 @@ public final class RtBloomPipeline {
     private long boundDownsampleInput;
     private long boundDownsampleOutput;
 
-    // --- blur (Kawase) ---
-    private final long blurDescriptorSetLayout;
-    private final long blurDescriptorPool;
-    private final long blurDescriptorSet;
-    private final long blurPipelineLayout;
-    private final long blurPipeline;
-    private long boundBlurInput;
-    private long boundBlurOutput;
-
     // --- upsample (intermediate + final composite) ---
     private final long upsampleDescriptorSetLayout;
     private final long upsampleDescriptorPool;
@@ -78,7 +69,6 @@ public final class RtBloomPipeline {
     private RtBloomPipeline(RtContext ctx,
                             long threshDsl, long threshPool, long threshSet, long threshLayout, long threshPipeline,
                             long downsampleDsl, long downsamplePool, long downsampleSet, long downsampleLayout, long downsamplePipeline,
-                            long blurDsl, long blurPool, long blurSet, long blurLayout, long blurPipeline,
                             long upsampleDsl, long upsamplePool, long upsampleSet, long upsampleLayout, long upsamplePipeline) {
         this.ctx = ctx;
         this.threshDescriptorSetLayout = threshDsl;
@@ -91,11 +81,6 @@ public final class RtBloomPipeline {
         this.downsampleDescriptorSet = downsampleSet;
         this.downsamplePipelineLayout = downsampleLayout;
         this.downsamplePipeline = downsamplePipeline;
-        this.blurDescriptorSetLayout = blurDsl;
-        this.blurDescriptorPool = blurPool;
-        this.blurDescriptorSet = blurSet;
-        this.blurPipelineLayout = blurLayout;
-        this.blurPipeline = blurPipeline;
         this.upsampleDescriptorSetLayout = upsampleDsl;
         this.upsampleDescriptorPool = upsamplePool;
         this.upsampleDescriptorSet = upsampleSet;
@@ -146,25 +131,6 @@ public final class RtBloomPipeline {
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, downsamplePipeline, "bloom downsample pipeline");
             VK10.vkDestroyShaderModule(vk, downsampleModule, null);
 
-            // ---- blur: 2 STORAGE_IMAGE, int iteration ----
-            VkDescriptorSetLayoutBinding.Buffer blurBinds = twoStorageImageBindings(stack);
-            VkDescriptorSetLayoutCreateInfo blurDslci = VkDescriptorSetLayoutCreateInfo.calloc(stack)
-                    .sType$Default().pBindings(blurBinds);
-            check(VK10.vkCreateDescriptorSetLayout(vk, blurDslci, null, p), "vkCreateDescriptorSetLayout(bloom blur)");
-            long blurDsl = p.get(0);
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, blurDsl, "bloom blur dsl");
-            long blurPool = createPool(vk, stack, 2, "blur");
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, blurPool, "bloom blur pool");
-            long blurSet = allocateSet(vk, stack, blurPool, blurDsl, "blur");
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, blurSet, "bloom blur set");
-            long blurLayout = createPipelineLayout(vk, stack, blurDsl, Integer.BYTES, "blur");
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT, blurLayout, "bloom blur layout");
-            long blurModule = loadModule(vk, stack, "bloom_blur.comp.spv");
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, blurModule, "bloom blur shader");
-            long blurPipeline = createComputePipeline(vk, stack, blurLayout, blurModule, "blur");
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, blurPipeline, "bloom blur pipeline");
-            VK10.vkDestroyShaderModule(vk, blurModule, null);
-
             // ---- upsample: 2 STORAGE_IMAGE, float intensity ----
             VkDescriptorSetLayoutBinding.Buffer upsampleBinds = twoStorageImageBindings(stack);
             VkDescriptorSetLayoutCreateInfo upsampleDslci = VkDescriptorSetLayoutCreateInfo.calloc(stack)
@@ -187,7 +153,6 @@ public final class RtBloomPipeline {
             return new RtBloomPipeline(ctx,
                     threshDsl, threshPool, threshSet, threshLayout, threshPipeline,
                     downsampleDsl, downsamplePool, downsampleSet, downsampleLayout, downsamplePipeline,
-                    blurDsl, blurPool, blurSet, blurLayout, blurPipeline,
                     upsampleDsl, upsamplePool, upsampleSet, upsampleLayout, upsamplePipeline);
         }
     }
@@ -212,15 +177,6 @@ public final class RtBloomPipeline {
         boundDownsampleOutput = dstView;
     }
 
-    public void setBlurImages(long inView, long outView) {
-        if (boundBlurInput == inView && boundBlurOutput == outView) {
-            return;
-        }
-        writeTwoStorageImages(blurDescriptorSet, inView, outView);
-        boundBlurInput = inView;
-        boundBlurOutput = outView;
-    }
-
     public void setUpsampleImages(long dstView, long srcView) {
         if (boundUpsampleDst == dstView && boundUpsampleSrc == srcView) {
             return;
@@ -232,6 +188,7 @@ public final class RtBloomPipeline {
 
     // --- dispatch ---
 
+    /** Combined full-resolution threshold + 13-tap tent downsample: hdr → mip0. */
     public void dispatchThreshold(VkCommandBuffer cmd, int displayW, int displayH, float threshold, float knee) {
         try (MemoryStack stack = MemoryStack.stackPush();
              RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "bloom threshold")) {
@@ -248,6 +205,7 @@ public final class RtBloomPipeline {
         }
     }
 
+    /** 13-tap tent-filtered 2× downsample: src → dst (dst is half the resolution of src). */
     public void dispatchDownsample(VkCommandBuffer cmd, int srcW, int srcH) {
         try (MemoryStack stack = MemoryStack.stackPush();
              RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "bloom downsample")) {
@@ -260,21 +218,7 @@ public final class RtBloomPipeline {
         }
     }
 
-    /** Separable Gaussian blur pass. Set horizontal=true for horizontal, false for vertical. */
-    public void dispatchBlur(VkCommandBuffer cmd, int w, int h, boolean horizontal) {
-        try (MemoryStack stack = MemoryStack.stackPush();
-             RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "bloom gauss " + (horizontal ? "H" : "V"))) {
-            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, blurPipeline);
-            VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, blurPipelineLayout, 0,
-                    stack.longs(blurDescriptorSet), null);
-            ByteBuffer push = stack.malloc(Integer.BYTES);
-            push.putInt(0, horizontal ? 1 : 0);
-            VK10.vkCmdPushConstants(cmd, blurPipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
-            VK10.vkCmdDispatch(cmd, (w + 15) / 16, (h + 15) / 16, 1);
-        }
-    }
-
-    /** Upsample src into dst (dst += bilinear_sample(src) * intensity). */
+    /** Tent-filtered 2× upsample + additive composite: dst += upsample(src) × intensity. */
     public void dispatchUpsample(VkCommandBuffer cmd, int dstW, int dstH, float intensity) {
         try (MemoryStack stack = MemoryStack.stackPush();
              RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "bloom upsample")) {
@@ -299,10 +243,6 @@ public final class RtBloomPipeline {
         VK10.vkDestroyPipelineLayout(vk, downsamplePipelineLayout, null);
         VK10.vkDestroyDescriptorPool(vk, downsampleDescriptorPool, null);
         VK10.vkDestroyDescriptorSetLayout(vk, downsampleDescriptorSetLayout, null);
-        VK10.vkDestroyPipeline(vk, blurPipeline, null);
-        VK10.vkDestroyPipelineLayout(vk, blurPipelineLayout, null);
-        VK10.vkDestroyDescriptorPool(vk, blurDescriptorPool, null);
-        VK10.vkDestroyDescriptorSetLayout(vk, blurDescriptorSetLayout, null);
         VK10.vkDestroyPipeline(vk, upsamplePipeline, null);
         VK10.vkDestroyPipelineLayout(vk, upsamplePipelineLayout, null);
         VK10.vkDestroyDescriptorPool(vk, upsampleDescriptorPool, null);

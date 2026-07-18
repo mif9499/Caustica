@@ -860,19 +860,20 @@ public final class CausticaConfig {
         }
 
         /**
-         * Bloom post-processing. Adds a soft glow around bright light sources in the HDR image
-         * before tone mapping and exposure metering.
+         * Dual-filtering bloom post-processing. A 6-level 13-tap tent-filtered pyramid
+         * adds a soft glow around bright light sources in the HDR image before tone mapping
+         * and exposure metering. Pyramid depth is controlled by the radius parameter.
          */
         public static final class Bloom {
             public static final BooleanSetting ENABLED = bool("caustica.rt.bloom", "bloom.enabled", true);
             public static final FloatSetting INTENSITY =
-                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.2f, 0.0f, 3.0f);
+                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.1f, 0.0f, 3.0f);
             public static final FloatSetting THRESHOLD =
                     clampedFloat("caustica.rt.bloom.threshold", "bloom.threshold", 0.0f, 0.0f, 10.0f);
             public static final FloatSetting KNEE =
-                    clampedFloat("caustica.rt.bloom.knee", "bloom.knee", 1.0f, 0.0f, 2.0f);
-            public static final IntSetting SPREAD =
-                    clampedInt("caustica.rt.bloom.spread", "bloom.spread", 3, 0, 3);
+                    clampedFloat("caustica.rt.bloom.knee", "bloom.knee", 6.0f, 0.0f, 6.0f);
+            public static final IntSetting RADIUS =
+                    clampedInt("caustica.rt.bloom.radius", "bloom.radius", 3, 0, 6);
 
             private Bloom() {
             }
@@ -889,8 +890,8 @@ public final class CausticaConfig {
                 return KNEE.value();
             }
 
-            public static int spread() {
-                return SPREAD.value();
+            public static int radius() {
+                return RADIUS.value();
             }
         }
     }
