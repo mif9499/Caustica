@@ -617,6 +617,7 @@ public final class RtEntities {
             // The deferred horizon guarantees these are off all queues, so destroying them now is safe.
             listsForFree.releaseDeferred();
         }));
+        tableRing[tableSlot].flush(0L, (long) build.count * TABLE_ENTRY_BYTES);
         return new FrameEntities(base, build.instances, build.blas, build.geomTableAddr);
     }
 
@@ -1262,6 +1263,13 @@ public final class RtEntities {
         return ctx.createBuffer(Math.max(minSize, MIN_BUFFER_SIZE), usage, hostVisible, label);
     }
 
+    private RtBuffer allocAlignedBuffer(RtContext ctx, long minSize, int usage, boolean hostVisible,
+                                        String label, long addressAlignment) {
+        RtFrameStats.FRAME.count("vmaBufferCreates", 1);
+        return ctx.createAlignedBuffer(Math.max(minSize, MIN_BUFFER_SIZE), usage, hostVisible, label,
+                addressAlignment);
+    }
+
     /** Lazily initialise this frame's build (instance list seeded with terrain, fresh free-lists, table ring slot). */
     private void beginBuildIfNeeded(RtContext ctx, FrameBuild build) {
         if (build.instances != null) {
@@ -1697,12 +1705,13 @@ public final class RtEntities {
                 && slot.updatesSinceBuild < refitRebuildInterval();
         if (canUpdate) {
             RtFrameStats.FRAME.count("refits", 1);
-            long required = RtAccel.scratchBufferSize(ctx, slot.updateScratchSize);
+            long required = slot.updateScratchSize;
             if (slot.refitScratch == null || slot.refitScratch.size < required) {
                 if (slot.refitScratch != null) {
                     slot.refitScratch.destroy();
                 }
-                slot.refitScratch = allocBuffer(ctx, required, storage, false, "entity refit scratch");
+                slot.refitScratch = allocAlignedBuffer(ctx, required, storage, false, "entity refit scratch",
+                        ctx.accelerationStructureScratchAlignment());
                 RtFrameStats.FRAME.count("entityVmaBufferCreates", 1);
             } else {
                 RtFrameStats.FRAME.count("entityScratchBufferReuses", 1);
