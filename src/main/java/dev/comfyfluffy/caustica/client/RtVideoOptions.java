@@ -43,6 +43,10 @@ public final class RtVideoOptions {
             waterWaves(),
             dlssRr(),
             dlssQuality(),
+            tonemapContrast(),
+            tonemapSaturation(),
+            tonemapTemperature(),
+            tonemapVibrance(),
             hdrEnabled(),
             hdrPaperWhite(),
             hdrPeak(),
@@ -186,6 +190,58 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(0, DLSS_QUALITY_ORDER.size() - 1),
             initialPosition,
             position -> setting.set(DLSS_QUALITY_ORDER.get(position)));
+    }
+
+    private static OptionInstance<Integer> tonemapContrast() {
+        FloatSetting setting = CausticaConfig.Rt.Tonemap.CONTRAST;
+        return new OptionInstance<>(
+            "caustica.options.rt.tonemapContrast",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.tonemapContrast.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption,
+                    Component.literal(percent + "%")),
+            new OptionInstance.IntRange(50, 200),
+            Math.clamp(Math.round(setting.value() * 100.0f), 50, 200),
+            percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Integer> tonemapSaturation() {
+        FloatSetting setting = CausticaConfig.Rt.Tonemap.SATURATION;
+        return new OptionInstance<>(
+            "caustica.options.rt.tonemapSaturation",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.tonemapSaturation.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption,
+                    Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 200),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 200),
+            percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Integer> tonemapTemperature() {
+        FloatSetting setting = CausticaConfig.Rt.Tonemap.TEMPERATURE;
+        return new OptionInstance<>(
+            "caustica.options.rt.tonemapTemperature",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.tonemapTemperature.tooltip")),
+            (caption, value) -> {
+                String label = value == 0 ? "0"
+                        : value > 0 ? "+" + value
+                        : Integer.toString(value);
+                return Options.genericValueLabel(caption, Component.literal(label));
+            },
+            new OptionInstance.IntRange(-100, 100),
+            Math.clamp(Math.round(setting.value() * 100.0f), -100, 100),
+            value -> setting.set(value / 100.0f));
+    }
+
+    private static OptionInstance<Integer> tonemapVibrance() {
+        FloatSetting setting = CausticaConfig.Rt.Tonemap.VIBRANCE;
+        return new OptionInstance<>(
+            "caustica.options.rt.tonemapVibrance",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.tonemapVibrance.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption,
+                    Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 200),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 200),
+            percent -> setting.set(percent / 100.0f));
     }
 
     private static OptionInstance<Boolean> hdrEnabled() {

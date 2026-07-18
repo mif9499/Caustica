@@ -66,6 +66,15 @@
 	"caustica.options.rt.dlssQuality.2": "质量",
 	"caustica.options.rt.dlssQuality.5": "DLAA",
 
+	"caustica.options.rt.tonemapContrast": "对比度",
+	"caustica.options.rt.tonemapContrast.tooltip": "AgX 色调对比度。以中性灰为轴心。超过100%加深阴影、提亮高光。",
+	"caustica.options.rt.tonemapSaturation": "饱和度",
+	"caustica.options.rt.tonemapSaturation.tooltip": "全局色彩饱和度。0 = 灰度，100% = 中性，200% = 鲜艳。",
+	"caustica.options.rt.tonemapTemperature": "色温",
+	"caustica.options.rt.tonemapTemperature.tooltip": "白平衡偏移。正 = 偏暖（琥珀色），负 = 偏冷（蓝色）。",
+	"caustica.options.rt.tonemapVibrance": "自然饱和度",
+	"caustica.options.rt.tonemapVibrance.tooltip": "智能饱和度增强。对低饱和颜色效果更强，不影响原本鲜艳的颜色。",
+
 	"caustica.options.rt.debugView": "调试视图",
 	"caustica.options.rt.debugView.tooltip": "显示光线追踪的中间缓冲区，而不是最终图像。",
 	"caustica.options.rt.debugView.0": "关闭",

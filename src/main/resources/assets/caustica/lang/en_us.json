@@ -83,6 +83,15 @@
 	"caustica.options.rt.dlssQuality.2": "Quality",
 	"caustica.options.rt.dlssQuality.5": "DLAA",
 
+	"caustica.options.rt.tonemapContrast": "Contrast",
+	"caustica.options.rt.tonemapContrast.tooltip": "AgX look contrast. Pivots around mid-grey. Above 100% deepens shadows and brightens highlights.",
+	"caustica.options.rt.tonemapSaturation": "Saturation",
+	"caustica.options.rt.tonemapSaturation.tooltip": "Global colour saturation. 0 = greyscale, 100% = neutral, 200% = vivid.",
+	"caustica.options.rt.tonemapTemperature": "Temperature",
+	"caustica.options.rt.tonemapTemperature.tooltip": "White-balance shift. Positive = warmer (amber), negative = cooler (blue).",
+	"caustica.options.rt.tonemapVibrance": "Vibrance",
+	"caustica.options.rt.tonemapVibrance.tooltip": "Smart saturation boost. Stronger on muted colours, leaves already-vivid colours alone.",
+
 	"caustica.options.rt.debugView": "Debug View",
 	"caustica.options.rt.debugView.tooltip": "Visualize an intermediate ray-tracing buffer instead of the final image.",
 	"caustica.options.rt.debugView.0": "Off",

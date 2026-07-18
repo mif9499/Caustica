@@ -59,7 +59,8 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
-            Rt.Hdr.ENABLED, Rt.Bloom.ENABLED, Rt.Water.ABSORPTION_R, Rt.Water.Swamp.ABSORPTION_R, Ngx.PATH,
+            Rt.Hdr.ENABLED, Rt.Bloom.ENABLED, Rt.Water.ABSORPTION_R, Rt.Water.Swamp.ABSORPTION_R,
+            Rt.Tonemap.CONTRAST, Ngx.PATH,
         };
     }
 
@@ -105,12 +106,17 @@ public final class CausticaConfig {
                         + " blurs them with iterative Kawase passes, and composites the glow back.\n"
                         + " intensity: bloom blend strength. threshold: luminance above which pixels bloom.\n"
                         + " knee: soft transition width below the threshold. blur-passes: Kawase iterations (0-6).");
-        FILE.setComment("water",
-                " Water absorption coefficients (per-channel per-metre extinction). Higher = darker / more\n"
-                        + " opaque; 0 = crystal clear. water.default.* applies to most biomes; water.swamp.*\n"
-                        + " overrides swamp and mangrove swamp. Further per-biome overrides are in\n"
-                        + " config/caustica_water_colors.json.");
-    }
+	        FILE.setComment("water",
+	                " Water absorption coefficients (per-channel per-metre extinction). Higher = darker / more\n"
+	                        + " opaque; 0 = crystal clear. water.default.* applies to most biomes; water.swamp.*\n"
+	                        + " overrides swamp and mangrove swamp. Further per-biome overrides are in\n"
+	                        + " config/caustica_water_colors.json.");
+	        FILE.setComment("tonemap",
+	                " AgX tonemapping look controls. Applied after the AgX contrast curve.\n"
+	                        + " contrast: 0.5-2.0 (1.04 = default). saturation: 0.0-2.0 (1.05).\n"
+	                        + " temperature: -1.0 (cool) to 1.0 (warm). vibrance: 0.0-2.0 (1.0), "
+	                        + "boosts muted colours.");
+	    }
 
     private static Path resolveConfigPath() {
         try {
@@ -716,6 +722,30 @@ public final class CausticaConfig {
                 }
                 return "auto";
             }
+        }
+
+        /**
+         * AgX tonemapping look controls. Applied after the AgX contrast curve and before the outset
+         * matrix. Defaults match the previously-hardcoded {@code applyLook()} values (which were
+         * commented out before these settings were added).
+         */
+        public static final class Tonemap {
+            public static final FloatSetting CONTRAST =
+                    clampedFloat("caustica.rt.tonemap.contrast", "tonemap.contrast", 1.04f, 0.5f, 2.0f);
+            public static final FloatSetting SATURATION =
+                    clampedFloat("caustica.rt.tonemap.saturation", "tonemap.saturation", 1.05f, 0.0f, 2.0f);
+            public static final FloatSetting TEMPERATURE =
+                    clampedFloat("caustica.rt.tonemap.temperature", "tonemap.temperature", 0.0f, -1.0f, 1.0f);
+            public static final FloatSetting VIBRANCE =
+                    clampedFloat("caustica.rt.tonemap.vibrance", "tonemap.vibrance", 1.0f, 0.0f, 2.0f);
+
+            private Tonemap() {
+            }
+
+            public static float contrast()    { return CONTRAST.value(); }
+            public static float saturation()  { return SATURATION.value(); }
+            public static float temperature() { return TEMPERATURE.value(); }
+            public static float vibrance()    { return VIBRANCE.value(); }
         }
 
         /** Render-frame timing + hitch logging. See {@code RtFrameStats}. */

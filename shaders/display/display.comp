@@ -13,6 +13,10 @@ layout(push_constant) uniform Push {
     int hdrEnabled;        // 0 = SDR only, 1 = also write the PQ HDR image
     float paperWhiteNits;  // absolute nits SDR paper white maps to
     float headroom;        // highlight headroom above paper white (peakNits / paperWhiteNits, >= 1)
+    float contrast;        // AgX look contrast (0.5-2.0, default 1.04)
+    float saturation;      // saturation multiplier (0.0-2.0, default 1.05)
+    float temperature;     // white-balance shift: +warm, -cool (-1.0-1.0, default 0.0)
+    float vibrance;        // smart saturation boost for low-saturation colours (0.0-2.0, default 1.0)
 } pc;
 
 // Tonemap seam: map HDR RT radiance to displayable LDR before copying back to the main target.
@@ -47,13 +51,22 @@ vec3 agxDefaultContrast(vec3 x) {
 }
 
 vec3 applyLook(vec3 color) {
-    const float contrast = 1.04;   // try 1.15, 1.25, 1.4
-    const float saturation = 1.05; // try 1.05-1.15 if AgX feels grey
+    // Contrast: pivot around mid-grey so shadows/highlights compress/expand symmetrically.
+    color = clamp((color - 0.5) * pc.contrast + 0.5, 0.0, 1.0);
 
-    color = clamp((color - 0.5) * contrast + 0.5, 0.0, 1.0);
+    // Colour temperature: simple warm/cool white-balance shift.
+    float t = pc.temperature;
+    color.r *= 1.0 + t * 0.15;
+    color.b *= 1.0 - t * 0.15;
 
+    // Saturation.
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    color = mix(vec3(luma), color, saturation);
+    color = mix(vec3(luma), color, pc.saturation);
+
+    // Vibrance: stronger boost on muted colours, leaves already-vivid colours alone.
+    float peakSat = max(max(abs(color.r - luma), abs(color.g - luma)), abs(color.b - luma));
+    float vibFactor = 1.0 + (pc.vibrance - 1.0) * (1.0 - peakSat);
+    color = mix(vec3(luma), color, vibFactor);
 
     return color;
 }
@@ -63,7 +76,7 @@ vec3 agx(vec3 color) {
     color = clamp(log2(max(color, vec3(1.0e-10))), AGX_MIN_EV, AGX_MAX_EV);
     color = (color - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
     color = agxDefaultContrast(color);
-    // color = applyLook(color);
+    color = applyLook(color);
     color = AGX_OUTSET * color;
     return clamp(color, 0.0, 1.0);
 }
