@@ -294,9 +294,9 @@ public final class RtVideoOptions {
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomIntensity.tooltip")),
             (caption, percent) -> Options.genericValueLabel(caption,
                     Component.literal(percent + "%")),
-            new OptionInstance.IntRange(0, 300),
-            Math.clamp(Math.round(setting.value() * 500.0f), 0, 300),
-            percent -> setting.set(percent / 500.0f));
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
+            percent -> setting.set(percent / 100.0f));
     }
 
     private static OptionInstance<Integer> bloomThreshold() {

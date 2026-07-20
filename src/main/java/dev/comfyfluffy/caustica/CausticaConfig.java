@@ -111,19 +111,20 @@ public final class CausticaConfig {
                         + " drive the scene-HDR -> display mapping.");
         FILE.setComment("bloom",
                 " Bloom post-processing. Extracts bright regions from the HDR image before tone mapping,\n"
-                        + " blurs them with iterative Kawase passes, and composites the glow back.\n"
-                        + " intensity: bloom blend strength. threshold: luminance above which pixels bloom.\n"
-                        + " knee: soft transition width below the threshold. blur-passes: Kawase iterations (0-6).");
+                        + " blurs them with a 6-level 13-tap tent-filter pyramid, and composites the glow back.\n"
+                        + " intensity: UI 0-100% mapped through an internal 0.2× coefficient so 50% ≈ old 10%.\n"
+                        + " threshold: luminance above which pixels bloom. knee: soft transition width below\n"
+                        + " the threshold. radius: pyramid depth (0-6, controls max spread).");
 	        FILE.setComment("water",
 	                " Water absorption coefficients (per-channel per-metre extinction). Higher = darker / more\n"
 	                        + " opaque; 0 = crystal clear. water.default.* applies to most biomes; water.swamp.*\n"
 	                        + " overrides swamp and mangrove swamp. Further per-biome overrides are in\n"
 	                        + " config/caustica_water_colors.json.");
-	        FILE.setComment("tonemap",
-	                " AgX tonemapping look controls. Applied after the AgX contrast curve.\n"
-	                        + " contrast: 0.5-2.0 (1.04 = default). saturation: 0.0-2.0 (1.05).\n"
-	                        + " temperature: -1.0 (cool) to 1.0 (warm). vibrance: 0.0-2.0 (1.0), "
-	                        + "boosts muted colours.");
+        FILE.setComment("tonemap",
+                " AgX tonemapping look controls. Applied after the AgX contrast curve.\n"
+                        + " contrast: 0.5-2.0 (1.0 = default). saturation: 0.0-2.0 (1.25).\n"
+                        + " temperature: -1.0 (cool) to 1.0 (warm). vibrance: 0.0-2.0 (1.0), "
+                        + "boosts muted colours.");
 	    }
 
     private static Path resolveConfigPath() {
@@ -756,9 +757,9 @@ public final class CausticaConfig {
          */
         public static final class Tonemap {
             public static final FloatSetting CONTRAST =
-                    clampedFloat("caustica.rt.tonemap.contrast", "tonemap.contrast", 1.04f, 0.5f, 2.0f);
+                    clampedFloat("caustica.rt.tonemap.contrast", "tonemap.contrast", 1.0f, 0.5f, 2.0f);
             public static final FloatSetting SATURATION =
-                    clampedFloat("caustica.rt.tonemap.saturation", "tonemap.saturation", 1.05f, 0.0f, 2.0f);
+                    clampedFloat("caustica.rt.tonemap.saturation", "tonemap.saturation", 1.25f, 0.0f, 2.0f);
             public static final FloatSetting TEMPERATURE =
                     clampedFloat("caustica.rt.tonemap.temperature", "tonemap.temperature", 0.0f, -1.0f, 1.0f);
             public static final FloatSetting VIBRANCE =
@@ -853,11 +854,11 @@ public final class CausticaConfig {
          */
         public static final class Water {
             public static final FloatSetting ABSORPTION_R =
-                    clampedFloat("caustica.rt.waterAbsorptionR", "water.default.absorption-r", 0.04f, 0.0f, 1.0f);
+                    clampedFloat("caustica.rt.waterAbsorptionR", "water.default.absorption-r", 0.2f, 0.0f, 1.0f);
             public static final FloatSetting ABSORPTION_G =
-                    clampedFloat("caustica.rt.waterAbsorptionG", "water.default.absorption-g", 0.02f, 0.0f, 1.0f);
+                    clampedFloat("caustica.rt.waterAbsorptionG", "water.default.absorption-g", 0.0f, 0.0f, 1.0f);
             public static final FloatSetting ABSORPTION_B =
-                    clampedFloat("caustica.rt.waterAbsorptionB", "water.default.absorption-b", 0.008f, 0.0f, 1.0f);
+                    clampedFloat("caustica.rt.waterAbsorptionB", "water.default.absorption-b", 0.0f, 0.0f, 1.0f);
 
             private Water() {
             }
@@ -869,11 +870,11 @@ public final class CausticaConfig {
             /** Swamp biome water absorption overrides (swamp + mangrove swamp). */
             public static final class Swamp {
                 public static final FloatSetting ABSORPTION_R =
-                        clampedFloat("caustica.rt.swampWaterAbsorptionR", "water.swamp.absorption-r", 0.02f, 0.0f, 1.0f);
+                        clampedFloat("caustica.rt.swampWaterAbsorptionR", "water.swamp.absorption-r", 0.15f, 0.0f, 1.0f);
                 public static final FloatSetting ABSORPTION_G =
-                        clampedFloat("caustica.rt.swampWaterAbsorptionG", "water.swamp.absorption-g", 0.02f, 0.0f, 1.0f);
+                        clampedFloat("caustica.rt.swampWaterAbsorptionG", "water.swamp.absorption-g", 0.15f, 0.0f, 1.0f);
                 public static final FloatSetting ABSORPTION_B =
-                        clampedFloat("caustica.rt.swampWaterAbsorptionB", "water.swamp.absorption-b", 0.06f, 0.0f, 1.0f);
+                        clampedFloat("caustica.rt.swampWaterAbsorptionB", "water.swamp.absorption-b", 0.15f, 0.0f, 1.0f);
 
                 private Swamp() {
                 }
@@ -892,13 +893,13 @@ public final class CausticaConfig {
         public static final class Bloom {
             public static final BooleanSetting ENABLED = bool("caustica.rt.bloom", "bloom.enabled", true);
             public static final FloatSetting INTENSITY =
-                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.1f, 0.0f, 3.0f);
+                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.5f, 0.0f, 1.0f);
             public static final FloatSetting THRESHOLD =
                     clampedFloat("caustica.rt.bloom.threshold", "bloom.threshold", 0.0f, 0.0f, 10.0f);
             public static final FloatSetting KNEE =
                     clampedFloat("caustica.rt.bloom.knee", "bloom.knee", 6.0f, 0.0f, 6.0f);
             public static final IntSetting RADIUS =
-                    clampedInt("caustica.rt.bloom.radius", "bloom.radius", 3, 0, 6);
+                    clampedInt("caustica.rt.bloom.radius", "bloom.radius", 4, 0, 6);
 
             private Bloom() {
             }

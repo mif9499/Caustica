@@ -68,7 +68,7 @@ public final class RtBloom {
 
         float threshold = CausticaConfig.Rt.Bloom.threshold();
         float knee = CausticaConfig.Rt.Bloom.knee();
-        float intensity = CausticaConfig.Rt.Bloom.intensity();
+        float intensity = CausticaConfig.Rt.Bloom.intensity() * 0.2f;
         int radius = CausticaConfig.Rt.Bloom.radius();
 
         // 1. Combined threshold + downsample: hdr → mip0 (full-res threshold, 13-tap tent ds)
