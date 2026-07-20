@@ -10,3 +10,4 @@ out/
 third_party/
 bin/
 Agent/
+.zcode/
