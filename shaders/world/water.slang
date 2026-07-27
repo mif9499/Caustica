@@ -49,8 +49,9 @@ public void waterWaveSpectrum<let WITH_DT : int>(float2 p, float t, float footpr
         if (lodWeight <= 0.0) break;
         float k = 2.0 * PI / lambda;
         float w = sqrt(WAVE_G * k);   // deep-water dispersion: phase speed √(g/k)
-        // Heading: deterministic irregular spread about the wind, widening down the spectrum.
-        float spread = (0.15 + 0.11 * float(i)) * sin(float(i) * 2.4 + 1.3);
+        // Heading: irregular spread about the wind, widening down the spectrum.
+        // Quadratic phase term breaks periodicity so no two layers share a direction.
+        float spread = (0.18 + 0.14 * float(i)) * sin(float(i) * 2.399 + 1.733 + float(i) * float(i) * 0.197);
         float cs = cos(spread), sn = sin(spread);
         float2 d = float2(WAVE_WIND.x * cs - WAVE_WIND.y * sn, WAVE_WIND.x * sn + WAVE_WIND.y * cs);
         float ph = k * dot(d, p) - w * t + 1.7 * float(i) * float(i);
@@ -107,7 +108,7 @@ public float2 crossSwellGrad(float2 p, float t, float footprint) {
         if (lodWeight <= 0.0) break;
         float k = 2.0 * PI / lambda;
         float w = sqrt(WAVE_G * k);
-        float spread = (0.15 + 0.11 * float(i)) * sin(float(i) * 2.4 + 1.3);
+        float spread = (0.18 + 0.14 * float(i)) * sin(float(i) * 2.399 + 1.733 + float(i) * float(i) * 0.197);
         float cs = cos(spread), sn = sin(spread);
         float2 d = float2(windDir.x * cs - windDir.y * sn, windDir.x * sn + windDir.y * cs);
         float ph = k * dot(d, p) - w * t + 1.7 * float(i) * float(i);
