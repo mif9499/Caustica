@@ -78,8 +78,6 @@
 		"caustica.options.rt.waveCount.tooltip": "Number of wave frequency layers. Fewer = calm swells only, more = fine surface ripples.",
 		"caustica.options.rt.waveCrestSharpness": "Crest Sharpness",
 		"caustica.options.rt.waveCrestSharpness.tooltip": "How pointy the wave crests are. Lower = rounded gentle swells, higher = sharp choppy peaks.",
-		"caustica.options.rt.waveCrossStrength": "Cross Swell",
-		"caustica.options.rt.waveCrossStrength.tooltip": "Strength of a second wave field from the side, creating diamond-shaped wave patterns. 0 = single-direction waves only.",
 		"caustica.options.rt.waveWavelengthBase": "Wave Width",
 		"caustica.options.rt.waveWavelengthBase.tooltip": "Base wavelength of the largest waves in metres. Higher = wider, more open wave spacing.",
 		"caustica.options.rt.waveOctaveDiv": "Wave Spacing",

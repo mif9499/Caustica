@@ -85,7 +85,6 @@ public final class RtVideoOptions {
         list.addSmall(waveSpeed());
         list.addSmall(waveCount());
         list.addSmall(waveCrestSharpness());
-        list.addSmall(waveCrossStrength());
         list.addSmall(waveWavelengthBase());
         list.addSmall(waveOctaveDiv());
     }
@@ -146,18 +145,6 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(5, 30),
             Math.clamp(Math.round(setting.value() * 10.0f), 5, 30),
             tenths -> setting.set(tenths / 10.0f));
-    }
-
-    private static OptionInstance<Integer> waveCrossStrength() {
-        FloatSetting setting = CausticaConfig.Rt.Water.WAVE_CROSS_STRENGTH;
-        return new OptionInstance<>(
-            "caustica.options.rt.waveCrossStrength",
-            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.waveCrossStrength.tooltip")),
-            (caption, percent) -> Options.genericValueLabel(caption,
-                    Component.literal(percent + "%")),
-            new OptionInstance.IntRange(0, 100),
-            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
-            percent -> setting.set(percent / 100.0f));
     }
 
     private static OptionInstance<Integer> waveWavelengthBase() {

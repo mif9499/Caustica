@@ -87,47 +87,9 @@ public void waterWaveSpectrum<let WITH_DT : int>(float2 p, float t, float footpr
     gradDt *= worldPush.waterWaveConfig.x;
 }
 
-// Cross swell: a lighter second wave field perpendicular to the main wind, producing diamond-shaped
-// wave patterns. Uses only the longer wavelengths (fewer octaves) and skips meander for speed.
-// Strength is read from waterAnchor.w.
-public float2 crossSwellGrad(float2 p, float t, float footprint) {
-    float crossStrength = worldPush.waterAnchor.w;
-    if (crossStrength <= 0.0) return float2(0.0, 0.0);
-    int waveCount = int(clamp(worldPush.waterWaveConfig.z, 1.0, 10.0));
-    int crossCount = min(waveCount, 5); // cross swell has fewer layers
-    float crestSharpness = worldPush.waterWaveConfig.w;
-    const float Q[5] = { 0.030, 0.035, 0.042, 0.050, 0.060 }; // long-wavelength subset
-    t *= worldPush.waterWaveConfig.y;
-    float2 grad = float2(0.0, 0.0);
-    // Perpendicular to main wind
-    float2 windDir = normalize(float2(-WAVE_WIND.y, WAVE_WIND.x));
-    float lambda = worldPush.waterWaveConfig2.x;
-    float octaveDiv = worldPush.waterWaveConfig2.y;
-    for (int i = 0; i < crossCount; i++) {
-        float lodWeight = waterWaveLodWeight(lambda, footprint);
-        if (lodWeight <= 0.0) break;
-        float k = 2.0 * PI / lambda;
-        float w = sqrt(WAVE_G * k);
-        float spread = (0.18 + 0.14 * float(i)) * sin(float(i) * 2.399 + 1.733 + float(i) * float(i) * 0.197);
-        float cs = cos(spread), sn = sin(spread);
-        float2 d = float2(windDir.x * cs - windDir.y * sn, windDir.x * sn + windDir.y * cs);
-        float ph = k * dot(d, p) - w * t + 1.7 * float(i) * float(i);
-        float2 dph = k * d;
-        float S = crestSharpness * (1.0 + 0.1 * float(i));
-        float sinPh = sin(ph);
-        float cosPh = cos(ph);
-        float e = exp(S * (sinPh - 1.0));
-        float amplitude = lodWeight * (Q[i] / k) * S;
-        grad += amplitude * cosPh * e * dph;
-        lambda /= octaveDiv;
-    }
-    return grad * worldPush.waterWaveConfig.x * crossStrength;
-}
-
 public float2 waterWaveGrad(float2 p, float t, float footprint) {
     float2 grad, gradDt;
     waterWaveSpectrum<0>(p, t, footprint, grad, gradDt);
-    grad += crossSwellGrad(p, t, footprint);
     return grad;
 }
 
@@ -143,11 +105,6 @@ public void waterWaveGradTemporal(float2 p, float currentT, float previousT, flo
     float2 gradDt;
     waterWaveSpectrum<1>(p, currentT, footprint, currentGrad, gradDt);
     previousGrad = currentGrad - (currentT - previousT) * worldPush.waterWaveConfig.y * gradDt;
-    // Blend cross swell: evaluate at both time points and add to each gradient.
-    float2 crossCur = crossSwellGrad(p, currentT, footprint);
-    float2 crossPrev = crossSwellGrad(p, previousT, footprint);
-    currentGrad += crossCur;
-    previousGrad += crossPrev;
 }
 
 // Perturb a (near-)horizontal water surface normal by the wave field. Flowing side faces (|n.y| small)

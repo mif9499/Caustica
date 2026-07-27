@@ -896,9 +896,6 @@ public final class CausticaConfig {
             /** Crest sharpness base. Higher = pointier crests vs rounded swells. */
             public static final FloatSetting WAVE_CREST_SHARPNESS =
                     clampedFloat("caustica.rt.waveCrestSharpness", "water.wave-crest-sharpness", 0.5f, 0.5f, 3.0f);
-            /** Cross swell strength. Blends a second wave field perpendicular to the wind for diamond-shaped wave patterns. */
-            public static final FloatSetting WAVE_CROSS_STRENGTH =
-                    clampedFloat("caustica.rt.waveCrossStrength", "water.wave-cross-strength", 1.0f, 0.0f, 1.0f);
             /** Base wavelength in metres. Higher = wider, more open wave spacing. */
             public static final FloatSetting WAVE_WAVELENGTH_BASE =
                     clampedFloat("caustica.rt.waveWavelengthBase", "water.wave-wavelength-base", 15.0f, 5.0f, 40.0f);
