@@ -886,7 +886,7 @@ public final class CausticaConfig {
 
             /** Wave overall strength. Higher = choppier, more broken reflections. */
             public static final FloatSetting WAVE_STRENGTH =
-                    clampedFloat("caustica.rt.waveStrength", "water.wave-strength", 0.3f, 0.0f, 1.0f);
+                    clampedFloat("caustica.rt.waveStrength", "water.wave-strength", 0.5f, 0.0f, 1.0f);
             /** Wave animation speed. Higher = faster wave motion. */
             public static final FloatSetting WAVE_SPEED =
                     clampedFloat("caustica.rt.waveSpeed", "water.wave-speed", 0.6f, 0.1f, 2.0f);
@@ -898,10 +898,10 @@ public final class CausticaConfig {
                     clampedFloat("caustica.rt.waveCrestSharpness", "water.wave-crest-sharpness", 0.5f, 0.5f, 3.0f);
             /** Base wavelength in metres. Higher = wider, more open wave spacing. */
             public static final FloatSetting WAVE_WAVELENGTH_BASE =
-                    clampedFloat("caustica.rt.waveWavelengthBase", "water.wave-wavelength-base", 15.0f, 5.0f, 40.0f);
+                    clampedFloat("caustica.rt.waveWavelengthBase", "water.wave-wavelength-base", 8.0f, 5.0f, 40.0f);
             /** Octave divider. Controls how quickly wavelengths shorten per layer. Higher = wider gaps between successive wave sizes. */
             public static final FloatSetting WAVE_OCTAVE_DIV =
-                    clampedFloat("caustica.rt.waveOctaveDiv", "water.wave-octave-div", 1.5f, 1.2f, 2.5f);
+                    clampedFloat("caustica.rt.waveOctaveDiv", "water.wave-octave-div", 1.3f, 1.2f, 2.5f);
         }
 
         /**
