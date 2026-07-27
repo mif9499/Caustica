@@ -9,10 +9,8 @@
 import world_common;
 import world_core;
 
-public static const float WATER_DENSITY = 0.1;
-public static const float3 WATER_ABSORB_FLOOR = float3(0.015, 0.010, 0.008);
 public float3 waterExtinction(float3 tint) {
-    return WATER_ABSORB_FLOOR + WATER_DENSITY * (float3(1.0, 1.0, 1.0) - clamp(tint, 0.0, 1.0));
+    return clamp(tint, 0.0, 1.0);
 }
 
 // A non-water dielectric's tint is a filter over one block of travel rather than a biome water colour, so
