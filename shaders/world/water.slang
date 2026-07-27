@@ -17,9 +17,11 @@
 import world_common;
 import world_core;
 
-public static const float WATER_WAVE_STRENGTH = 0.3;  // slope scale (higher = choppier glints / more broken reflections)
-public static const float WAVE_SPEED = 0.8;           // global time scale; dispersion keeps relative speeds physical
-public static const int   WAVE_COUNT = 10;            // λ = 14 m … 0.38 m (each octave 1.5× shorter)
+// Wave parameters are runtime-tunable via worldPush.waterWaveConfig:
+//   x = waveStrength  (default 0.3)
+//   y = waveSpeed     (default 0.8)
+//   z = waveCount     (default 10)
+//   w = crestSharpness (default 1.2, short waves get proportionally sharper)
 public static const float WAVE_G = 9.81;
 public static const float2 WAVE_WIND = normalize(float2(1.0, 0.35)); // dominant travel direction
 public static const float WAVE_MEANDER = 1.1;         // crest phase-wobble amplitude (rad) on the long components
@@ -34,12 +36,15 @@ public float waterWaveLodWeight(float wavelength, float footprint) {
 public void waterWaveSpectrum<let WITH_DT : int>(float2 p, float t, float footprint,
                                           out float2 grad, out float2 gradDt) {
     // Per-wave steepness a·k: gentle in the long swell, concentrated in the mid/short chop.
-    const float Q[WAVE_COUNT] = { 0.030, 0.035, 0.042, 0.050, 0.060, 0.065, 0.065, 0.058, 0.048, 0.038 };
-    t *= WAVE_SPEED;
+    const float Q[10] = { 0.030, 0.035, 0.042, 0.050, 0.060, 0.065, 0.065, 0.058, 0.048, 0.038 };
+    t *= worldPush.waterWaveConfig.y;
+    int waveCount = int(clamp(worldPush.waterWaveConfig.z, 1.0, 10.0));
+    float crestSharpness = worldPush.waterWaveConfig.w;
     grad = float2(0.0, 0.0);
     gradDt = float2(0.0, 0.0);
-    float lambda = 14.0;
-    for (int i = 0; i < WAVE_COUNT; i++) {
+    float lambda = worldPush.waterWaveConfig2.x;
+    float octaveDiv = worldPush.waterWaveConfig2.y;
+    for (int i = 0; i < waveCount; i++) {
         float lodWeight = waterWaveLodWeight(lambda, footprint);
         if (lodWeight <= 0.0) break;
         float k = 2.0 * PI / lambda;
@@ -63,7 +68,7 @@ public void waterWaveSpectrum<let WITH_DT : int>(float2 p, float t, float footpr
                 dphDt = (-WAVE_MEANDER * sin(wph) * wphDt * 0.4 * k) * pd;
             }
         }
-        float S = 1.2 + 0.12 * float(i); // crest sharpness: the short chop is choppier
+        float S = crestSharpness * (1.0 + 0.1 * float(i)); // crest sharpness: the short chop is choppier
         float sinPh = sin(ph);
         float cosPh = cos(ph);
         float e = exp(S * (sinPh - 1.0));
@@ -75,15 +80,53 @@ public void waterWaveSpectrum<let WITH_DT : int>(float2 p, float t, float footpr
             gradDt += amplitude * e
                     * (phDt * (-sinPh + S * cosPh * cosPh) * dph + cosPh * dphDt);
         }
-        lambda /= 1.5;
+        lambda /= octaveDiv;
     }
-    grad *= WATER_WAVE_STRENGTH;
-    gradDt *= WATER_WAVE_STRENGTH;
+    grad *= worldPush.waterWaveConfig.x;
+    gradDt *= worldPush.waterWaveConfig.x;
+}
+
+// Cross swell: a lighter second wave field perpendicular to the main wind, producing diamond-shaped
+// wave patterns. Uses only the longer wavelengths (fewer octaves) and skips meander for speed.
+// Strength is read from waterAnchor.w.
+public float2 crossSwellGrad(float2 p, float t, float footprint) {
+    float crossStrength = worldPush.waterAnchor.w;
+    if (crossStrength <= 0.0) return float2(0.0, 0.0);
+    int waveCount = int(clamp(worldPush.waterWaveConfig.z, 1.0, 10.0));
+    int crossCount = min(waveCount, 5); // cross swell has fewer layers
+    float crestSharpness = worldPush.waterWaveConfig.w;
+    const float Q[5] = { 0.030, 0.035, 0.042, 0.050, 0.060 }; // long-wavelength subset
+    t *= worldPush.waterWaveConfig.y;
+    float2 grad = float2(0.0, 0.0);
+    // Perpendicular to main wind
+    float2 windDir = normalize(float2(-WAVE_WIND.y, WAVE_WIND.x));
+    float lambda = worldPush.waterWaveConfig2.x;
+    float octaveDiv = worldPush.waterWaveConfig2.y;
+    for (int i = 0; i < crossCount; i++) {
+        float lodWeight = waterWaveLodWeight(lambda, footprint);
+        if (lodWeight <= 0.0) break;
+        float k = 2.0 * PI / lambda;
+        float w = sqrt(WAVE_G * k);
+        float spread = (0.15 + 0.11 * float(i)) * sin(float(i) * 2.4 + 1.3);
+        float cs = cos(spread), sn = sin(spread);
+        float2 d = float2(windDir.x * cs - windDir.y * sn, windDir.x * sn + windDir.y * cs);
+        float ph = k * dot(d, p) - w * t + 1.7 * float(i) * float(i);
+        float2 dph = k * d;
+        float S = crestSharpness * (1.0 + 0.1 * float(i));
+        float sinPh = sin(ph);
+        float cosPh = cos(ph);
+        float e = exp(S * (sinPh - 1.0));
+        float amplitude = lodWeight * (Q[i] / k) * S;
+        grad += amplitude * cosPh * e * dph;
+        lambda /= octaveDiv;
+    }
+    return grad * worldPush.waterWaveConfig.x * crossStrength;
 }
 
 public float2 waterWaveGrad(float2 p, float t, float footprint) {
     float2 grad, gradDt;
     waterWaveSpectrum<0>(p, t, footprint, grad, gradDt);
+    grad += crossSwellGrad(p, t, footprint);
     return grad;
 }
 
@@ -98,7 +141,12 @@ public void waterWaveGradTemporal(float2 p, float currentT, float previousT, flo
                            out float2 currentGrad, out float2 previousGrad) {
     float2 gradDt;
     waterWaveSpectrum<1>(p, currentT, footprint, currentGrad, gradDt);
-    previousGrad = currentGrad - (currentT - previousT) * WAVE_SPEED * gradDt;
+    previousGrad = currentGrad - (currentT - previousT) * worldPush.waterWaveConfig.y * gradDt;
+    // Blend cross swell: evaluate at both time points and add to each gradient.
+    float2 crossCur = crossSwellGrad(p, currentT, footprint);
+    float2 crossPrev = crossSwellGrad(p, previousT, footprint);
+    currentGrad += crossCur;
+    previousGrad += crossPrev;
 }
 
 // Perturb a (near-)horizontal water surface normal by the wave field. Flowing side faces (|n.y| small)

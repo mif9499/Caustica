@@ -79,6 +79,15 @@ public final class RtVideoOptions {
                 CausticaConfig.Rt.Water.Swamp.ABSORPTION_G, "caustica.options.rt.swamp.absorptionG"));
         list.addSmall(waterSlider(
                 CausticaConfig.Rt.Water.Swamp.ABSORPTION_B, "caustica.options.rt.swamp.absorptionB"));
+
+        list.addHeader(Component.translatable("caustica.options.rt.water.wave.header"));
+        list.addSmall(waveStrength());
+        list.addSmall(waveSpeed());
+        list.addSmall(waveCount());
+        list.addSmall(waveCrestSharpness());
+        list.addSmall(waveCrossStrength());
+        list.addSmall(waveWavelengthBase());
+        list.addSmall(waveOctaveDiv());
     }
 
     private static OptionInstance<Integer> waterSlider(FloatSetting setting, String key) {
@@ -90,6 +99,89 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(0, 100),
             Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
             percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Integer> waveStrength() {
+        FloatSetting setting = CausticaConfig.Rt.Water.WAVE_STRENGTH;
+        return new OptionInstance<>(
+            "caustica.options.rt.waveStrength",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.waveStrength.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption,
+                    Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
+            percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Integer> waveSpeed() {
+        FloatSetting setting = CausticaConfig.Rt.Water.WAVE_SPEED;
+        return new OptionInstance<>(
+            "caustica.options.rt.waveSpeed",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.waveSpeed.tooltip")),
+            (caption, tenths) -> Options.genericValueLabel(caption,
+                    Component.literal(String.format(Locale.ROOT, "%.1f", tenths / 10.0f))),
+            new OptionInstance.IntRange(1, 20),
+            Math.clamp(Math.round(setting.value() * 10.0f), 1, 20),
+            tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<Integer> waveCount() {
+        IntSetting setting = CausticaConfig.Rt.Water.WAVE_COUNT;
+        return new OptionInstance<>(
+            "caustica.options.rt.waveCount",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.waveCount.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, value),
+            new OptionInstance.IntRange(1, 10),
+            Math.clamp(setting.value(), 1, 10),
+            setting::set);
+    }
+
+    private static OptionInstance<Integer> waveCrestSharpness() {
+        FloatSetting setting = CausticaConfig.Rt.Water.WAVE_CREST_SHARPNESS;
+        return new OptionInstance<>(
+            "caustica.options.rt.waveCrestSharpness",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.waveCrestSharpness.tooltip")),
+            (caption, tenths) -> Options.genericValueLabel(caption,
+                    Component.literal(String.format(Locale.ROOT, "%.1f", tenths / 10.0f))),
+            new OptionInstance.IntRange(5, 30),
+            Math.clamp(Math.round(setting.value() * 10.0f), 5, 30),
+            tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<Integer> waveCrossStrength() {
+        FloatSetting setting = CausticaConfig.Rt.Water.WAVE_CROSS_STRENGTH;
+        return new OptionInstance<>(
+            "caustica.options.rt.waveCrossStrength",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.waveCrossStrength.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption,
+                    Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
+            percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Integer> waveWavelengthBase() {
+        FloatSetting setting = CausticaConfig.Rt.Water.WAVE_WAVELENGTH_BASE;
+        return new OptionInstance<>(
+            "caustica.options.rt.waveWavelengthBase",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.waveWavelengthBase.tooltip")),
+            (caption, metres) -> Options.genericValueLabel(caption,
+                    Component.literal(metres + " m")),
+            new OptionInstance.IntRange(5, 40),
+            Math.clamp(Math.round(setting.value()), 5, 40),
+            metres -> setting.set(metres.floatValue()));
+    }
+
+    private static OptionInstance<Integer> waveOctaveDiv() {
+        FloatSetting setting = CausticaConfig.Rt.Water.WAVE_OCTAVE_DIV;
+        return new OptionInstance<>(
+            "caustica.options.rt.waveOctaveDiv",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.waveOctaveDiv.tooltip")),
+            (caption, tenths) -> Options.genericValueLabel(caption,
+                    Component.literal(String.format(Locale.ROOT, "%.1f", tenths / 10.0f))),
+            new OptionInstance.IntRange(12, 25),
+            Math.clamp(Math.round(setting.value() * 10.0f), 12, 25),
+            tenths -> setting.set(tenths / 10.0f));
     }
 
     private static OptionInstance<String> exposureMode() {

@@ -883,6 +883,28 @@ public final class CausticaConfig {
                 public static float g() { return ABSORPTION_G.value(); }
                 public static float b() { return ABSORPTION_B.value(); }
             }
+
+            /** Wave overall strength. Higher = choppier, more broken reflections. */
+            public static final FloatSetting WAVE_STRENGTH =
+                    clampedFloat("caustica.rt.waveStrength", "water.wave-strength", 0.5f, 0.0f, 1.0f);
+            /** Wave animation speed. Higher = faster wave motion. */
+            public static final FloatSetting WAVE_SPEED =
+                    clampedFloat("caustica.rt.waveSpeed", "water.wave-speed", 0.6f, 0.1f, 2.0f);
+            /** Number of wave octaves. Fewer = calmer, fewer fine ripples. */
+            public static final IntSetting WAVE_COUNT =
+                    clampedInt("caustica.rt.waveCount", "water.wave-count", 7, 1, 10);
+            /** Crest sharpness base. Higher = pointier crests vs rounded swells. */
+            public static final FloatSetting WAVE_CREST_SHARPNESS =
+                    clampedFloat("caustica.rt.waveCrestSharpness", "water.wave-crest-sharpness", 0.5f, 0.5f, 3.0f);
+            /** Cross swell strength. Blends a second wave field perpendicular to the wind for diamond-shaped wave patterns. */
+            public static final FloatSetting WAVE_CROSS_STRENGTH =
+                    clampedFloat("caustica.rt.waveCrossStrength", "water.wave-cross-strength", 1.0f, 0.0f, 1.0f);
+            /** Base wavelength in metres. Higher = wider, more open wave spacing. */
+            public static final FloatSetting WAVE_WAVELENGTH_BASE =
+                    clampedFloat("caustica.rt.waveWavelengthBase", "water.wave-wavelength-base", 10.0f, 5.0f, 40.0f);
+            /** Octave divider. Controls how quickly wavelengths shorten per layer. Higher = wider gaps between successive wave sizes. */
+            public static final FloatSetting WAVE_OCTAVE_DIV =
+                    clampedFloat("caustica.rt.waveOctaveDiv", "water.wave-octave-div", 1.5f, 1.2f, 2.5f);
         }
 
         /**
