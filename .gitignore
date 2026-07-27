@@ -11,3 +11,4 @@ third_party/
 bin/
 Agent/
 .zcode/
+/logs
