@@ -1,159 +1,363 @@
-// Water surface: the wave spectrum (with its analytic time derivative), the normal perturbation it
-// drives, and the caustic term that differentiates the same field. Depends on core.
-
-
-// Animated surface waves — a directional wave spectrum, gradient-only (the surface stays geometrically
-// flat; only the normal tilts). Three things make it read as water rather than animated glass:
-//  * Sharp-crested profile: each component is h = a·exp(S·(sin φ − 1)) — peaked crests, wide flat
-//    troughs (pure sines look like rolling jelly). Still C∞ smooth with an exact analytic gradient.
-//  * Real deep-water dispersion ω = √(g·k): long swell strides past (λ=14 m → ~4.7 m/s) while short
-//    chop flutters nearly in place — wrong relative speeds are the biggest tell of fake water.
-//  * Wind + meander: headings spread around a fixed wind direction (tight for the swell, wide for the
-//    chop), and the largest components' phase is modulated along their crest (chain-ruled into the
-//    gradient) so wavefronts wander instead of ruling straight periodic lines across the sea.
-// The domain is world-anchored (see applyWaterWaves) so the pattern is pinned in world space, and the
-// caustics (waterCaustic) differentiate this same field, so they stay in sync with the visible ripples.
+// Water surface: 3D gradient-noise wave field. Perlin-style gradient noise (a
+// random gradient per lattice cell) is naturally directional — it reads as
+// wind-driven waves rather than blobs or grid lines. Sampling a 3D lattice on
+// the 2D water surface (the third axis is time) keeps the pattern organic at
+// every scale: the slice cuts the cubic lattice at a continuously varying
+// angle, so no grid line or repeating motif ever coheres — 2D lattices (square
+// or triangular) always show their cell structure, which is why the earlier 2D
+// attempts read as seam lines or repeating bumps.
+//
+// Cost notes (why this stays close to the old sine spectrum):
+//  * Gradients are analytic (gradNoise3DEx): one lattice walk returns both the
+//    height and the exact gradient — no finite-difference probe, no eps tuning.
+//  * Per-octave drift directions are a precomputed constant table, so the walk
+//    costs no per-octave trigonometry.
+//  * The temporal pair rewalks only the coarse octaves for the previous frame
+//    (fine chop barely contributes to the reprojection vector).
+//  * Octaves fade in via waterWaveLodWeight instead of a hard break, and the
+//    caustic landing path culls sub-probe detail.
+//
+// Height gain = roughness^i; gradient gain = (roughness/lacunarity)^i so the
+// gradient sum converges — no "ringing" when detail is turned up.
+//
+// All public interfaces (applyWaterWaves, waterCaustic, waterWaveGrad, etc.)
+// are unchanged so no call-sites in the path tracer or guide pass needed
+// modification.
 
 import world_common;
 import world_core;
 
-// Wave parameters are runtime-tunable via worldPush.waterWaveConfig:
-//   x = waveStrength  (default 0.3)
-//   y = waveSpeed     (default 0.8)
-//   z = waveCount     (default 10)
-//   w = crestSharpness (default 1.2, short waves get proportionally sharper)
-public static const float WAVE_G = 9.81;
-public static const float2 WAVE_WIND = normalize(float2(1.0, 0.35)); // dominant travel direction
-public static const float WAVE_MEANDER = 1.1;         // crest phase-wobble amplitude (rad) on the long components
-public float waterWaveLodWeight(float wavelength, float footprint) {
-    float cyclesPerPixel = max(footprint, 0.0) / max(wavelength, 1.0e-4);
-    return 1.0 - smoothstep(0.25, 0.5, cyclesPerPixel);
+// ---- 3D hashing -------------------------------------------------------------
+// Fast lattice-point hash → [0, 1). No trig: only fract + dot products.
+// Used to seed gradient vectors; the distribution at integer-lattice inputs is
+// well-scrambled enough for gradient-noise interpolation.
+
+float hash3D(float3 p) {
+    float3 q = fract(p * 0.3183099f + float3(0.1f, 0.2f, 0.3f));
+    q += dot(q, q.yzx + 19.19f);
+    return fract(q.x * q.y * q.z * 73.157f);
 }
 
-// One walk of the wave spectrum, shared by every consumer so the spectrum constants exist once. WITH_DT
-// is a generic so the derivative terms are compiled out entirely for callers that only want the
-// gradient — the trigonometry is shared, but the chain-rule work is not free.
-public void waterWaveSpectrum<let WITH_DT : int>(float2 p, float t, float footprint,
-                                          out float2 grad, out float2 gradDt) {
-    // Per-wave steepness a·k: gentle in the long swell, concentrated in the mid/short chop.
-    const float Q[10] = { 0.030, 0.035, 0.042, 0.050, 0.060, 0.065, 0.065, 0.058, 0.048, 0.038 };
-    t *= worldPush.waterWaveConfig.y;
-    int waveCount = int(clamp(worldPush.waterWaveConfig.z, 1.0, 10.0));
-    float crestSharpness = worldPush.waterWaveConfig.w;
-    grad = float2(0.0, 0.0);
-    gradDt = float2(0.0, 0.0);
-    float lambda = worldPush.waterWaveConfig2.x;
-    float octaveDiv = worldPush.waterWaveConfig2.y;
-    for (int i = 0; i < waveCount; i++) {
-        float lodWeight = waterWaveLodWeight(lambda, footprint);
-        if (lodWeight <= 0.0) break;
-        float k = 2.0 * PI / lambda;
-        float w = sqrt(WAVE_G * k);   // deep-water dispersion: phase speed √(g/k)
-        // Heading: irregular spread about the wind, widening down the spectrum.
-        // Quadratic phase term breaks periodicity so no two layers share a direction.
-        float spread = (0.18 + 0.14 * float(i)) * sin(float(i) * 2.399 + 1.733 + float(i) * float(i) * 0.197);
-        float cs = cos(spread), sn = sin(spread);
-        float2 d = float2(WAVE_WIND.x * cs - WAVE_WIND.y * sn, WAVE_WIND.x * sn + WAVE_WIND.y * cs);
-        float ph = k * dot(d, p) - w * t + 1.7 * float(i) * float(i);
-        float2 dph = k * d;
-        float phDt = -w;                      // ∂φ/∂t
-        float2 dphDt = float2(0.0, 0.0);      // ∂(∇φ)/∂t
-        if (i < 4) { // meander only the components whose fronts are long enough to read as lines
-            float2 pd = float2(-d.y, d.x);
-            float wph = 0.4 * k * dot(pd, p) + 0.5 * w * t;
-            ph += WAVE_MEANDER * sin(wph);
-            dph += (WAVE_MEANDER * cos(wph) * 0.4 * k) * pd;
-            if (WITH_DT != 0) {
-                float wphDt = 0.5 * w;
-                phDt += WAVE_MEANDER * cos(wph) * wphDt;
-                dphDt = (-WAVE_MEANDER * sin(wph) * wphDt * 0.4 * k) * pd;
-            }
-        }
-        float S = crestSharpness * (1.0 + 0.1 * float(i)); // crest sharpness: the short chop is choppier
-        float sinPh = sin(ph);
-        float cosPh = cos(ph);
-        float e = exp(S * (sinPh - 1.0));
-        // a = Q/k; ∇h = a·S·cos φ·e^{S(sin φ−1)}·∇φ
-        float amplitude = lodWeight * (Q[i] / k) * S;
-        grad += amplitude * cosPh * e * dph;
-        if (WITH_DT != 0) {
-            // ∂/∂t of the term above, chain-ruled through φ and ∇φ.
-            gradDt += amplitude * e
-                    * (phDt * (-sinPh + S * cosPh * cosPh) * dph + cosPh * dphDt);
-        }
-        lambda /= octaveDiv;
-    }
-    grad *= worldPush.waterWaveConfig.x;
-    gradDt *= worldPush.waterWaveConfig.x;
+// Map a lattice point to a pseudo-random 3D gradient vector (unnormalised,
+// roughly uniform over [−1, 1]³). One hash3D call + three scaled fracts.
+
+float3 hashGradient3D(float3 lattice) {
+    float h = hash3D(lattice);
+    return float3(
+        fract(h * 127.1f) * 2.0f - 1.0f,
+        fract(h * 269.5f) * 2.0f - 1.0f,
+        fract(h * 311.7f) * 2.0f - 1.0f
+    );
 }
+
+// ---- Domain rotation ---------------------------------------------------------
+// Two 2D rotations applied in sequence (xy then xz) so no lattice plane aligns
+// with the sampling plane — the property that keeps 2D slices of the 3D field
+// organic at every scale. The angles are irrational-ish (~49° and ~65°) so no
+// alignment survives.
+
+static const float2 ROT_A = float2(0.754877666f, 0.655866346f);
+static const float2 ROT_B = float2(0.909297427f, 0.416146837f);
+
+float3 rotateDomain(float3 p) {
+    float rx = p.x * ROT_A.y - p.y * ROT_A.x;
+    float ry = p.x * ROT_A.x + p.y * ROT_A.y;
+    float rz = rx * ROT_B.y - p.z * ROT_B.x;
+    float rx2 = rx * ROT_B.x + p.z * ROT_B.y;
+    return float3(rx2, ry, rz);
+}
+
+// ---- 3D gradient noise (Perlin-style) with analytic gradient -----------------
+// Each lattice corner contributes dot(gradient, offset) instead of a scalar
+// hash value. Quintic-smoothstep interpolation (C² continuous) makes the
+// analytic gradient clean and grid-artefact-free. The gradient is the chain
+// rule of the trilinear interpolation:
+//
+//   ∂n/∂f.i = du.i · ∂(trilinear)/∂u.i + Σ_k w_k · g_k.i
+//
+// du = 30·f²·(f−1)² is the quintic's derivative. Since f = r − floor(r),
+// ∂/∂f = ∂/∂r in the rotated domain, and the R^T back-rotation below maps the
+// gradient back to input/coord space so slopes keep their world orientation.
+
+void gradNoise3DEx(float3 p, out float v, out float3 grad) {
+    float3 r = rotateDomain(p);
+    float3 i = floor(r);
+    float3 f = fract(r);
+    float3 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
+    float3 du = 30.0f * f * f * (f - 1.0f) * (f - 1.0f);
+
+    float3 g000 = hashGradient3D(i + float3(0.0f, 0.0f, 0.0f));
+    float3 g100 = hashGradient3D(i + float3(1.0f, 0.0f, 0.0f));
+    float3 g010 = hashGradient3D(i + float3(0.0f, 1.0f, 0.0f));
+    float3 g110 = hashGradient3D(i + float3(1.0f, 1.0f, 0.0f));
+    float3 g001 = hashGradient3D(i + float3(0.0f, 0.0f, 1.0f));
+    float3 g101 = hashGradient3D(i + float3(1.0f, 0.0f, 1.0f));
+    float3 g011 = hashGradient3D(i + float3(0.0f, 1.0f, 1.0f));
+    float3 g111 = hashGradient3D(i + float3(1.0f, 1.0f, 1.0f));
+
+    float v000 = dot(g000, f - float3(0.0f, 0.0f, 0.0f));
+    float v100 = dot(g100, f - float3(1.0f, 0.0f, 0.0f));
+    float v010 = dot(g010, f - float3(0.0f, 1.0f, 0.0f));
+    float v110 = dot(g110, f - float3(1.0f, 1.0f, 0.0f));
+    float v001 = dot(g001, f - float3(0.0f, 0.0f, 1.0f));
+    float v101 = dot(g101, f - float3(1.0f, 0.0f, 1.0f));
+    float v011 = dot(g011, f - float3(0.0f, 1.0f, 1.0f));
+    float v111 = dot(g111, f - float3(1.0f, 1.0f, 1.0f));
+
+    float n00 = lerp(v000, v100, u.x);
+    float n10 = lerp(v010, v110, u.x);
+    float n01 = lerp(v001, v101, u.x);
+    float n11 = lerp(v011, v111, u.x);
+    v = lerp(lerp(n00, n10, u.y), lerp(n01, n11, u.y), u.z);
+
+    // Weight-derivative terms (du.i · ∂(trilinear)/∂u.i).
+    float gx = lerp(lerp(v100 - v000, v110 - v010, u.y),
+                    lerp(v101 - v001, v111 - v011, u.y), u.z) * du.x;
+    float gy = lerp(lerp(v010 - v000, v110 - v100, u.x),
+                    lerp(v011 - v001, v111 - v101, u.x), u.z) * du.y;
+    float gz = lerp(lerp(v001 - v000, v101 - v100, u.x),
+                    lerp(v011 - v010, v111 - v110, u.x), u.y) * du.z;
+
+    // Weighted average of the corner gradients (Σ w_k · g_k).
+    float gx0 = lerp(lerp(g000.x, g100.x, u.x), lerp(g010.x, g110.x, u.x), u.y);
+    float gx1 = lerp(lerp(g001.x, g101.x, u.x), lerp(g011.x, g111.x, u.x), u.y);
+    float gy0 = lerp(lerp(g000.y, g100.y, u.x), lerp(g010.y, g110.y, u.x), u.y);
+    float gy1 = lerp(lerp(g001.y, g101.y, u.x), lerp(g011.y, g111.y, u.x), u.y);
+    float gz0 = lerp(lerp(g000.z, g100.z, u.x), lerp(g010.z, g110.z, u.x), u.y);
+    float gz1 = lerp(lerp(g001.z, g101.z, u.x), lerp(g011.z, g111.z, u.x), u.y);
+    float3 gr = float3(gx + lerp(gx0, gx1, u.z),
+                       gy + lerp(gy0, gy1, u.z),
+                       gz + lerp(gz0, gz1, u.z));
+
+    // Undo the domain rotation (r = R·p ⇒ grad_p = R^T · grad_r).
+    grad = float3(gr.x * (ROT_A.y * ROT_B.x) + gr.y * ROT_A.x + gr.z * (ROT_A.y * ROT_B.y),
+                  gr.x * (-ROT_A.x * ROT_B.x) + gr.y * ROT_A.y + gr.z * (-ROT_A.x * ROT_B.y),
+                  gr.x * ROT_B.y - gr.z * ROT_B.x);
+}
+
+// ---- LOD utility --------------------------------------------------------------
+
+public float waterWaveLodWeight(float wavelength, float footprint) {
+    float cyclesPerPixel = max(footprint, 0.0f) / max(wavelength, 1.0e-4f);
+    return 1.0f - smoothstep(0.25f, 0.5f, cyclesPerPixel);
+}
+
+// ---- FBM wave field ------------------------------------------------------------
+
+// Per-octave drift directions (unit), precomputed: driftDir_i = R(0.17·i +
+// 0.03·i²) · NOISE_WIND, NOISE_WIND = normalize((1, 0.35)). A constant table
+// keeps the walk free of per-octave trigonometry.
+static const float2 DRIFT_DIR[10] = {
+    float2(0.943858356f, 0.330350425f),
+    float2(0.859413531f, 0.511281118f),
+    float2(0.699088192f, 0.715035454f),
+    float2(0.438673029f, 0.898646746f),
+    float2(0.074053655f, 0.997254259f),
+    float2(-0.357769777f, 0.933809823f),
+    float2(-0.761664795f, 0.647971249f),
+    float2(-0.989517775f, 0.144411126f),
+    float2(-0.889255141f, -0.457411515f),
+    float2(-0.403843368f, -0.914828145f)
+};
+
+// Core walk: height + analytic gradient from one lattice evaluation per octave.
+// Each octave drifts with the wind in xz while the noise's z axis is time —
+// genuine "heaving" motion. `octaveCap` bounds the walk (the temporal pair uses
+// a coarse previous-time walk; see waterWaveEvalTemporal).
+void waterWaveEvalCapped(float2 p, float t, float footprint, int octaveCap,
+                         out float height, out float2 grad) {
+    float scale       = worldPush.waterWaveConfig2.x;
+    float lacunarity  = worldPush.waterWaveConfig2.y;
+    float speed       = worldPush.waterWaveConfig.y;
+    int   octaves     = int(clamp(worldPush.waterWaveConfig.z, 1.0f, 10.0f));
+    float roughness   = worldPush.waterWaveConfig.w;
+
+    float h = 0.0f;
+    float2 gradSum = float2(0.0f, 0.0f);
+    float ampH = 1.0f;             // height gain: roughness^i
+    float ampG = 1.0f;             // gradient gain: (roughness/lacunarity)^i
+    float gainGrad = roughness / lacunarity;
+    float freq = 1.0f;
+    float maxVal = 0.0f;
+
+    for (int i = 0; i < min(octaves, octaveCap); i++) {
+        float wavelength = scale / freq;
+        // Smooth LOD fade: a hard inclusion break would make octaves pop at the
+        // footprint threshold, showing as banding.
+        float lodWeight = waterWaveLodWeight(wavelength, footprint);
+        if (lodWeight <= 0.0f) break;
+
+        float2 driftDir = DRIFT_DIR[i];
+        float driftSpeed = speed * (1.0f - 0.08f * float(i));
+
+        float3 coord = float3(
+            (p + driftDir * t * driftSpeed) * freq / scale,
+            t * speed * (0.5f + 0.15f * float(i))
+        );
+
+        float v;
+        float3 g;
+        gradNoise3DEx(coord, v, g);
+
+        h += ampH * v * lodWeight;
+        gradSum += ampG * g.xz * (freq / scale) * lodWeight;
+        maxVal += ampH * lodWeight;
+        ampH *= roughness;
+        ampG *= gainGrad;
+        freq *= lacunarity;
+    }
+
+    height = h / max(maxVal, 1.0e-6f);
+    grad = gradSum * worldPush.waterWaveConfig.x;
+}
+
+public void waterWaveEval(float2 p, float t, float footprint,
+                          out float height, out float2 grad) {
+    waterWaveEvalCapped(p, t, footprint, 10, height, grad);
+}
+
+// Standalone height query — kept for call sites that only need the height
+// (the unified walk above stays the hot path for everything else).
+public float waterNoiseHeight(float2 p, float t, float footprint) {
+    float h;
+    float2 g;
+    waterWaveEval(p, t, footprint, h, g);
+    return h;
+}
+
+// ---- Gradient ----------------------------------------------------------------
+// Analytic gradient from the shared walk (waterWaveEval) — exact per-octave
+// derivatives. Gradient gain = (roughness / lacunarity)^i so the sum converges;
+// without it the natural freq^i amplification of gradients makes every octave
+// equally loud when roughness × lacunarity ≈ 1, creating a noisy mess.
 
 public float2 waterWaveGrad(float2 p, float t, float footprint) {
-    float2 grad, gradDt;
-    waterWaveSpectrum<0>(p, t, footprint, grad, gradDt);
-    return grad;
+    float h;
+    float2 g;
+    waterWaveEval(p, t, footprint, h, g);
+    return g;
 }
 
 public float2 waterWaveGrad(float2 p, float t) {
-    return waterWaveGrad(p, t, 0.0);
+    return waterWaveGrad(p, t, 0.0f);
 }
 
-// Evaluate the current gradient and linearly rewind it to the previous phase in one spectrum walk.
-// Frame deltas are bounded on the CPU, so this avoids a second set of trigonometric/exponential work
-// while remaining accurate over the sub-frame interval used by reflection reprojection.
+// Temporal pair: evaluate height+gradient at two closely-spaced wave times for
+// specular motion-vector reprojection. The previous time is walked with only
+// the coarse octaves (cap 3): the reprojection vector is dominated by the
+// swell, whose gradient gain (roughness/lacunarity)^i is already ~0.03 by
+// octave 3 — a full previous walk would cost ~40% more for an imperceptible
+// change in the motion vector.
+
+public void waterWaveEvalTemporal(float2 p, float currentT, float previousT, float footprint,
+                                  out float2 currentGrad, out float2 previousGrad,
+                                  out float height) {
+    waterWaveEval(p, currentT, footprint, height, currentGrad);
+    float prevHeight;
+    waterWaveEvalCapped(p, previousT, footprint, 3, prevHeight, previousGrad);
+}
+
 public void waterWaveGradTemporal(float2 p, float currentT, float previousT, float footprint,
                            out float2 currentGrad, out float2 previousGrad) {
-    float2 gradDt;
-    waterWaveSpectrum<1>(p, currentT, footprint, currentGrad, gradDt);
-    previousGrad = currentGrad - (currentT - previousT) * worldPush.waterWaveConfig.y * gradDt;
+    float h;
+    waterWaveEvalTemporal(p, currentT, previousT, footprint, currentGrad, previousGrad, h);
 }
 
-// Perturb a (near-)horizontal water surface normal by the wave field. Flowing side faces (|n.y| small)
-// keep their flat geometric normal. `worldXZ` must be a world-stable coordinate (rebased hit + the pushed
-// anchor) so the ripples stay pinned in the world. `nGeo` is already oriented toward the viewer, so the
-// down-viewed underside (n.y < 0) takes the mirrored slope (-up).
+// ---- Normal perturbation (same interface as the original spectrum) -------------
+// Convert a wave gradient to a surface normal, clamped so the normal never tilts
+// past a safe angle from vertical. Without this, strong / fine-scale waves can
+// make the surface nearly horizontal — Fresnel → 1 from above (black mirror),
+// total internal reflection from below (can't see the sky).
+//
+// MAX_GRAD_LEN_SQ = 3.0 → ny ≥ 0.5 → normal stays within 60° of vertical.
+// Real ocean waves rarely exceed 30°; 60° is a generous safety limit.
+// The horizon-clip in the callers (see world_primary.rgen, world.rgen) prevents
+// the perturbed normal from tilting past the viewer-facing hemisphere — the true
+// source of the "normal flip" artefact.
+
+static const float MAX_GRAD_LEN_SQ = 3.0f;
+
+public float3 waveNormal(float2 grad) {
+    float gradLenSq = dot(grad, grad);
+    if (gradLenSq > MAX_GRAD_LEN_SQ) {
+        grad *= sqrt(MAX_GRAD_LEN_SQ / gradLenSq);
+    }
+    return normalize(float3(-grad.x, 1.0f, -grad.y));
+}
+
+// Perturb a (near-)horizontal water surface normal by the wave field. Flowing
+// side faces (|n.y| small) keep their flat geometric normal. `worldXZ` must be
+// a world-stable coordinate.
+//
+// Crest-shaping: raw noise produces uniform steepness everywhere — unlike real
+// waves which are steep only at crests. We evaluate the total noise height and
+// attenuate the gradient in troughs via exp(S·(h−1)), the same shaping function
+// the original sine-wave spectrum used. This concentrates normal perturbation at
+// wave peaks so the surface reads as natural water rather than uniform noise.
 public float3 applyWaterWaves(float3 nGeo, float2 worldXZ, float t, float footprint) {
-    if (abs(nGeo.y) < 0.5) return nGeo;
-    float2 grad = waterWaveGrad(worldXZ, t, footprint);
-    float3 up = normalize(float3(-grad.x, 1.0, -grad.y));
-    return nGeo.y >= 0.0 ? up : -up;
+    if (abs(nGeo.y) < 0.5f) return nGeo;
+    float2 grad;
+    float height;
+    waterWaveEval(worldXZ, t, footprint, height, grad);
+    // Map crest-sharpness config (0.3–0.8) to exp steepness S (1.5–4.0).
+    // At crest (height≈1): exp(0)=1 → full gradient.
+    // At trough (height≈-1): exp(−2S) → gradient severely reduced.
+    float S = lerp(1.5, 4.0, (worldPush.waterWaveConfig.w - 0.3) / 0.5);
+    float crest = saturate(exp(S * (height - 1.0)));
+    grad *= lerp(worldPush.waterWaveConfig3.x, 1.0, crest);
+    float3 up = waveNormal(grad);
+    return nGeo.y >= 0.0f ? up : -up;
 }
 
-// ---- Water caustics. Sunlight refracting through the waved surface converges/diverges before it
-// reaches an underwater receiver; the analytic wave field makes the true focusing factor computable
-// instead of faked with a scrolling texture. Where the shadow ray of an underwater NEE vertex crossed
-// water (returned by visibility() as VisibilityResult.waterHitT), evaluate the horizontal landing
-// position of the refracted sun ray as a function of surface position and finite-difference it. The
-// caustic intensity is the inverse Jacobian determinant of that surface→floor mapping (area compression = brightening, real
-// fold caustics where det → 0). Because this uses the SAME wave field as the visible surface normals,
-// the caustic pattern stays in sync with the ripples, and the per-sample sun-quad jitter (sampleSquare)
-// shifts the pattern per sample → caustics physically blur with depth under DLSS-RR accumulation.
-public static const float CAUSTIC_EPS = 0.25; // finite-difference step (m); also low-passes sub-step wave detail
-public static const float CAUSTIC_MAX = 6.0;  // focusing clamp: keeps fold-line singularities from becoming fireflies
+// ---- Caustics ------------------------------------------------------------------
+// Sunlight refracting through the waved surface converges/diverges before it
+// reaches an underwater receiver; the analytic wave field makes the true
+// focusing factor computable instead of faked with a scrolling texture. Where
+// the shadow ray of an underwater NEE vertex crossed water (returned by
+// visibility() as VisibilityResult.waterHitT), evaluate the horizontal landing
+// position of the refracted sun ray as a function of surface position and
+// finite-difference it. The caustic intensity is the inverse Jacobian
+// determinant of that surface→floor mapping (area compression = brightening,
+// real fold caustics where det → 0).
 
-// Horizontal landing offset of a refracted sun ray entering the surface at world-stable xz, intersected
-// with the receiver plane h metres below. inc = sunlight travel direction (downward, unit).
+public static const float CAUSTIC_EPS = 0.25f; // finite-difference step (m); also low-passes sub-step wave detail
+public static const float CAUSTIC_MAX = 6.0f;  // focusing clamp: keeps fold-line singularities from becoming fireflies
+
+// Horizontal landing offset of a refracted sun ray entering the surface at
+// world-stable xz, intersected with the receiver plane h metres below.
+// inc = sunlight travel direction (downward, unit).
 public float2 causticLanding(float2 xz, float t, float3 inc, float h) {
-    float2 g = waterWaveGrad(xz, t);
-    float3 nw = normalize(float3(-g.x, 1.0, -g.y));
-    float3 rdw = refract(inc, nw, 1.0 / WATER_IOR); // air→water: never TIR
-    return xz + rdw.xz * (h / max(-rdw.y, 0.05));
+    float2 g;
+    float height;
+    // Caustic octave budget: a fixed 10% of the base scale. The smooth LOD culls
+    // octaves finer than 2× the footprint, so caustics keep only the coarsest ~2
+    // octaves at lacunarity 2.5 (≈4 at 1.5), independent of scale — the surface
+    // path may use more, but finer caustic detail is smeared by the CAUSTIC_EPS
+    // landing finite difference and blurred by refraction depth anyway, so it
+    // only adds cost here.
+    float causticFootprint = max(worldPush.waterWaveConfig2.x * 0.1f, CAUSTIC_EPS);
+    waterWaveEval(xz, t, causticFootprint, height, g);
+    // Same crest-shaping as applyWaterWaves (see above) — concentrates gradient
+    // at wave peaks so caustics inherit the sine-wave-like fold pattern.
+    float S = lerp(1.5, 4.0, (worldPush.waterWaveConfig.w - 0.3) / 0.5);
+    float crest = saturate(exp(S * (height - 1.0)));
+    g *= lerp(worldPush.waterWaveConfig3.x, 1.0, crest);
+    float3 nw = waveNormal(g);
+    float3 rdw = refract(inc, nw, 1.0f / WATER_IOR);
+    return xz + rdw.xz * (h / max(-rdw.y, 0.05f));
 }
 
 public float waterCaustic(float3 exitPos, float3 lightDir, float waterDist) {
-    // Grazing light: the receiver-plane intersection degenerates and caustics vanish in reality anyway
-    // (long slant paths absorb + the pattern smears out) — fade the effect to neutral 1.0.
-    float fade = smoothstep(0.06, 0.18, lightDir.y);
-    if (fade <= 0.0) return 1.0;
-    float h = max(waterDist * lightDir.y, 0.05); // vertical depth of the receiver below the exit point
+    float fade = smoothstep(0.06f, 0.18f, lightDir.y);
+    if (fade <= 0.0f) return 1.0f;
+    float h = max(waterDist * lightDir.y, 0.05f);
     float t = worldPush.waterParams.w;
     float3 inc = -lightDir;
-    float2 base = exitPos.xz + worldPush.waterAnchor.xy;  // world-stable wave domain (same as applyWaterWaves)
+    float2 base = exitPos.xz + worldPush.waterAnchor.xy;
     float2 p0 = causticLanding(base, t, inc, h);
-    float2 px = causticLanding(base + float2(CAUSTIC_EPS, 0.0), t, inc, h);
-    float2 pz = causticLanding(base + float2(0.0, CAUSTIC_EPS), t, inc, h);
+    float2 px = causticLanding(base + float2(CAUSTIC_EPS, 0.0f), t, inc, h);
+    float2 pz = causticLanding(base + float2(0.0f, CAUSTIC_EPS), t, inc, h);
     float det = abs((px.x - p0.x) * (pz.y - p0.y) - (px.y - p0.y) * (pz.x - p0.x));
-    // Flat water ⇒ all landings displace identically ⇒ det = eps² ⇒ focus = 1 (energy-neutral); the
-    // clamp bounds the fold-line spikes whose energy the surrounding darkening already paid for.
-    float focus = (CAUSTIC_EPS * CAUSTIC_EPS) / max(det, 1.0e-5);
-    return lerp(1.0, min(focus, CAUSTIC_MAX), fade);
+    float focus = (CAUSTIC_EPS * CAUSTIC_EPS) / max(det, 1.0e-5f);
+    return lerp(1.0f, min(focus, CAUSTIC_MAX), fade);
 }

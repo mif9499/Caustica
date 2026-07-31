@@ -59,7 +59,8 @@ public struct WorldPush {
     public float4   waterParams;      // xyz camera-biome water tint, w wave time (s)
     public float4   waterAnchor;      // xy world-stable wave-domain anchor, z previous wave time
     public float4   waterWaveConfig;  // x waveStrength, y waveSpeed, z waveCount, w crestSharpness
-    public float4   waterWaveConfig2; // x wavelengthBase (m), y octaveDivider, zw reserved
+    public float4   waterWaveConfig2; // x wavelengthBase (m), y octaveDivider, z horizonStart, w horizonEnd
+    public float4   waterWaveConfig3; // x troughAttenuation, yzw reserved
     public float4x4 curViewProj;      // forward camera-relative view-projection
     public uint     breakCount;
     public BreakEntry breaking[8];    // Java capacity and breakCount serialization are generated from this

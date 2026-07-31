@@ -884,24 +884,33 @@ public final class CausticaConfig {
                 public static float b() { return ABSORPTION_B.value(); }
             }
 
-            /** Wave overall strength. Higher = choppier, more broken reflections. */
+            /** Noise overall strength. Higher = choppier, more broken reflections. */
             public static final FloatSetting WAVE_STRENGTH =
-                    clampedFloat("caustica.rt.waveStrength", "water.wave-strength", 0.5f, 0.0f, 1.0f);
-            /** Wave animation speed. Higher = faster wave motion. */
+                    clampedFloat("caustica.rt.waveStrength", "water.wave-strength", 0.5f, 0.0f, 2.0f);
+            /** Noise animation speed. Higher = faster surface motion. */
             public static final FloatSetting WAVE_SPEED =
-                    clampedFloat("caustica.rt.waveSpeed", "water.wave-speed", 0.6f, 0.1f, 2.0f);
-            /** Number of wave octaves. Fewer = calmer, fewer fine ripples. */
+                    clampedFloat("caustica.rt.waveSpeed", "water.wave-speed", 2.0f, 0.1f, 2.0f);
+            /** Number of noise octaves. Fewer = calmer, more = finer ripples. */
             public static final IntSetting WAVE_COUNT =
-                    clampedInt("caustica.rt.waveCount", "water.wave-count", 10, 1, 10);
-            /** Crest sharpness base. Higher = pointier crests vs rounded swells. */
+                    clampedInt("caustica.rt.waveCount", "water.wave-count", 5, 1, 10);
+            /** FBM roughness (gain per octave). Higher = more small detail. */
             public static final FloatSetting WAVE_CREST_SHARPNESS =
-                    clampedFloat("caustica.rt.waveCrestSharpness", "water.wave-crest-sharpness", 0.5f, 0.5f, 3.0f);
-            /** Base wavelength in metres. Higher = wider, more open wave spacing. */
+                    clampedFloat("caustica.rt.waveCrestSharpness", "water.wave-crest-sharpness", 0.7f, 0.3f, 0.8f);
+            /** Base spatial scale in metres. Smaller = finer features. */
             public static final FloatSetting WAVE_WAVELENGTH_BASE =
-                    clampedFloat("caustica.rt.waveWavelengthBase", "water.wave-wavelength-base", 8.0f, 5.0f, 40.0f);
-            /** Octave divider. Controls how quickly wavelengths shorten per layer. Higher = wider gaps between successive wave sizes. */
+                    clampedFloat("caustica.rt.waveWavelengthBase", "water.wave-wavelength-base", 4.0f, 1.0f, 20.0f);
+            /** Frequency lacunarity per octave. Higher = wider gaps between detail sizes. */
             public static final FloatSetting WAVE_OCTAVE_DIV =
-                    clampedFloat("caustica.rt.waveOctaveDiv", "water.wave-octave-div", 1.3f, 1.2f, 2.5f);
+                    clampedFloat("caustica.rt.waveOctaveDiv", "water.wave-octave-div", 2.5f, 1.5f, 3.0f);
+            /** NoV_geo threshold where horizon blend begins — waves start fading at flatter views. */
+            public static final FloatSetting WAVE_HORIZON_START =
+                    clampedFloat("caustica.rt.waveHorizonStart", "water.wave-horizon-start", 0.0f, 0.0f, 0.5f);
+            /** Blend amount: 0 = no fade, 1 = fully flat at the horizon. */
+            public static final FloatSetting WAVE_HORIZON_END =
+                    clampedFloat("caustica.rt.waveHorizonEnd", "water.wave-horizon-end", 1.0f, 0.0f, 1.0f);
+            /** Gradient attenuation in noise troughs. 0 = flat troughs, 1 = uniform (no shaping). */
+            public static final FloatSetting WAVE_TROUGH_ATTEN =
+                    clampedFloat("caustica.rt.waveTroughAtten", "water.wave-trough-atten", 0.2f, 0.0f, 1.0f);
         }
 
         /**

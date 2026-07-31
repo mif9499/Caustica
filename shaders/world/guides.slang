@@ -197,6 +197,21 @@ public void resolveTransmissionGuide(float3 surfacePos, float3 transmittedDir,
                     worldPush.waterParams.w, waterFootprint);
         }
 
+        // Soft horizon guard for guide-probe rays: wave-perturbed normals can
+        // tilt past the ray-origin hemisphere at grazing angles, which would
+        // feed a flipped interface into the refraction guide. Gated on the
+        // horizon blend amount like the primary ray's horizon fade.
+        if (isWater && (worldPush.flags & 16u) != 0u
+                && worldPush.waterWaveConfig2.w > 0.0f) {
+            float NoV = dot(-direction, interfaceNormal);
+            if (NoV < 0.05) {
+                // edge0 < edge1 keeps this portable: smoothstep with
+                // reversed edges is undefined in GLSL semantics.
+                float t = 1.0f - smoothstep(-0.01f, 0.05f, NoV);
+                interfaceNormal = normalize(lerp(interfaceNormal, geometricNormal, t));
+            }
+        }
+
         float transmission = clamp(payloadTransmission(), 0.0, 1.0);
         Medium entered = makeDielectricMedium(isWater, max(payloadIor(), 1.0),
                                               payload.albedo, transmission);
@@ -218,7 +233,7 @@ public void resolveTransmissionGuide(float3 surfacePos, float3 transmittedDir,
             mediumPop(medium);
         }
         direction = normalize(nextDirection);
-        ro = offsetSurfaceOrigin(interfacePos, geometricNormal, direction,
+        ro = offsetSurfaceOrigin(interfacePos, interfaceNormal, direction,
                 isWater ? SURF_BIAS : INSET_TRANSMIT_BIAS);
     }
 }

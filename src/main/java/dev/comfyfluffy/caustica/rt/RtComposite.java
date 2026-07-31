@@ -113,6 +113,22 @@ public final class RtComposite {
         return CausticaConfig.Rt.Composite.WATER_WAVES.value();
     }
 
+    // Detail layers beyond the gradient-gain floor add cost without visible detail:
+    // the per-octave gradient gain is (roughness / lacunarity)^i, so by the time it
+    // falls below ~1% that octave's contribution to the surface normal is invisible
+    // (≈5 layers at the default scale/spread). Cap the pushed count there; the UI
+    // slider keeps its full range because other scale/spread combinations converge
+    // later (e.g. lacunarity 1.5 still shows detail at layer 8).
+    private static int effectiveWaveOctaves() {
+        int count = CausticaConfig.Rt.Water.WAVE_COUNT.value();
+        float roughness = CausticaConfig.Rt.Water.WAVE_CREST_SHARPNESS.value();
+        float lacunarity = CausticaConfig.Rt.Water.WAVE_OCTAVE_DIV.value();
+        float gain = roughness / lacunarity;
+        if (gain <= 0f || gain >= 1f) return count; // no convergence: keep the user's choice
+        int maxUseful = (int) Math.ceil(Math.log(0.01) / Math.log(gain));
+        return Math.max(1, Math.min(count, maxUseful));
+    }
+
     // Finite sun/moon angular sizes let NEE shadow rays sample the light disk (soft, contact-hardening
     // penumbrae). Radii in degrees; the real sun/moon are ~0.27°, but a touch larger reads pleasantly.
     private static final int WATER_ANCHOR_MASK = 4095;
@@ -912,11 +928,13 @@ public final class RtComposite {
                     waterAnchor,
                     new Float4(CausticaConfig.Rt.Water.WAVE_STRENGTH.value(),
                             CausticaConfig.Rt.Water.WAVE_SPEED.value(),
-                            (float) CausticaConfig.Rt.Water.WAVE_COUNT.value(),
+                            (float) effectiveWaveOctaves(),
                             CausticaConfig.Rt.Water.WAVE_CREST_SHARPNESS.value()),
                     new Float4(CausticaConfig.Rt.Water.WAVE_WAVELENGTH_BASE.value(),
                             CausticaConfig.Rt.Water.WAVE_OCTAVE_DIV.value(),
-                            0f, 0f),
+                            CausticaConfig.Rt.Water.WAVE_HORIZON_START.value(),
+                            CausticaConfig.Rt.Water.WAVE_HORIZON_END.value()),
+                    new Float4(CausticaConfig.Rt.Water.WAVE_TROUGH_ATTEN.value(), 0f, 0f, 0f),
                     mvCurProjView,
                     breaking.length,
                     breaking,

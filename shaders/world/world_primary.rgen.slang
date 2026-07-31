@@ -110,15 +110,45 @@ public PathSegment tracePrimary(PathSegment seg,
             if (bounce == 0 && abs(geometricNormal.y) >= 0.5) {
                 float2 currentGrad;
                 float2 previousGrad;
-                waterWaveGradTemporal(waterDomain, worldPush.waterParams.w,
-                                      worldPush.waterAnchor.z, waterFootprint, currentGrad, previousGrad);
+                float height;
+                waterWaveEvalTemporal(waterDomain, worldPush.waterParams.w,
+                                      worldPush.waterAnchor.z, waterFootprint,
+                                      currentGrad, previousGrad, height);
+                // Crest-shaping: concentrate gradient at wave peaks (see applyWaterWaves).
+                float S = lerp(1.5, 4.0, (worldPush.waterWaveConfig.w - 0.3) / 0.5);
+                float crest = saturate(exp(S * (height - 1.0)));
+                float shape = lerp(worldPush.waterWaveConfig3.x, 1.0, crest);
+                currentGrad *= shape;
+                previousGrad *= shape;
                 float orientation = geometricNormal.y >= 0.0 ? 1.0 : -1.0;
-                n = orientation * normalize(float3(-currentGrad.x, 1.0, -currentGrad.y));
-                previousNormal = orientation
-                        * normalize(float3(-previousGrad.x, 1.0, -previousGrad.y));
+                n = orientation * waveNormal(currentGrad);
+                previousNormal = orientation * waveNormal(previousGrad);
             } else {
                 n = applyWaterWaves(geometricNormal, waterDomain,
                                     worldPush.waterParams.w, waterFootprint);
+            }
+        }
+
+        // At grazing viewing angles, wave-perturbed normals can tilt past the
+        // viewer-facing hemisphere, making the Fresnel dot product go negative.
+        // Smoothly fade the perturbation back toward the flat geometric normal
+        // as the view flattens — physically, ripple detail is invisible edge-on.
+        //
+        // waterWaveConfig2.z = blend position (NoV_geo where fade begins)
+        // waterWaveConfig2.w = blend amount (0 = no fade, 1 = full flat at horizon)
+        if (isWater && waterWaves) {
+            float NoV_geo = abs(dot(-rd, geometricNormal));
+            float horizonPos = worldPush.waterWaveConfig2.z;
+            float horizonAmount = worldPush.waterWaveConfig2.w;
+            if (horizonAmount > 0.0) {
+                float faded = smoothstep(horizonPos, horizonPos + 0.15, NoV_geo);
+                float waveScale = lerp(1.0, faded, horizonAmount);
+                if (waveScale < 1.0) {
+                    n = normalize(lerp(geometricNormal, n, waveScale));
+                    if (bounce == 0 && abs(geometricNormal.y) >= 0.5) {
+                        previousNormal = normalize(lerp(geometricNormal, previousNormal, waveScale));
+                    }
+                }
             }
         }
 
@@ -148,7 +178,7 @@ public PathSegment tracePrimary(PathSegment seg,
                 } else {
                     mediumPop(guideMedium);
                 }
-                resolveTransmissionGuide(hitPos, transmittedDir, geometricNormal,
+                resolveTransmissionGuide(hitPos, transmittedDir, n,
                         guideMedium, transmitBias, rayConeWidth, rayConeSpread,
                         !isWater && entering
                                 ? float3(payload.albedo) : float3(1.0, 1.0, 1.0));
@@ -168,7 +198,7 @@ public PathSegment tracePrimary(PathSegment seg,
             }
             float3 deferredDir = normalize(transmittedDir);
             PathSegment deferred = makePathSegment(
-                    offsetSurfaceOrigin(hitPos, geometricNormal, deferredDir, transmitBias),
+                    offsetSurfaceOrigin(hitPos, n, deferredDir, transmitBias),
                     deferredDir, throughput * (1.0 - F), transmittedMedium,
                     rayConeWidth, rayConeSpread, seed, bounce + 1,
                     true);
@@ -176,7 +206,7 @@ public PathSegment tracePrimary(PathSegment seg,
             nextRecord = splitRecord;
             float3 reflectedDir = reflect(rd, n);
             PathSegment reflected = makePathSegment(
-                    offsetSurfaceOrigin(hitPos, geometricNormal, reflectedDir, SURF_BIAS),
+                    offsetSurfaceOrigin(hitPos, n, reflectedDir, SURF_BIAS),
                     reflectedDir, throughput * F, medium,
                     rayConeWidth, rayConeSpread, seed ^ 0xa511e9b3u, bounce + 1,
                     true);
@@ -188,7 +218,7 @@ public PathSegment tracePrimary(PathSegment seg,
         if (!hasTransmission || F >= 1.0) {
             float3 reflectedDir = reflect(rd, n);
             continuation = makePathSegment(
-                    offsetSurfaceOrigin(hitPos, geometricNormal, reflectedDir, SURF_BIAS),
+                    offsetSurfaceOrigin(hitPos, n, reflectedDir, SURF_BIAS),
                     reflectedDir, throughput * F, medium,
                     rayConeWidth, rayConeSpread, seed, bounce + 1,
                     true);
@@ -200,7 +230,7 @@ public PathSegment tracePrimary(PathSegment seg,
                 mediumPop(medium);
             }
             continuation = makePathSegment(
-                    offsetSurfaceOrigin(hitPos, geometricNormal, deferredDir, transmitBias),
+                    offsetSurfaceOrigin(hitPos, n, deferredDir, transmitBias),
                     deferredDir, throughput * (1.0 - F), medium,
                     rayConeWidth, rayConeSpread, seed, bounce + 1,
                     true);

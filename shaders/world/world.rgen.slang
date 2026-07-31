@@ -139,6 +139,21 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
                                     worldPush.waterParams.w, waterFootprint);
             }
 
+            // Soft horizon guard for bounced rays: prevent wave-perturbed
+            // normals from tilting past the ray-origin hemisphere. Blends
+            // toward the geometric normal as the view flattens. Gated on the
+            // horizon blend amount so disabling the GUI fade also disables
+            // this guard (matches the primary ray's horizon fade).
+            if (isWater && waterWaves && worldPush.waterWaveConfig2.w > 0.0f) {
+                float NoV = dot(-rd, n);
+                if (NoV < 0.05) {
+                    // edge0 < edge1 keeps this portable: smoothstep with
+                    // reversed edges is undefined in GLSL semantics.
+                    float t = 1.0f - smoothstep(-0.01f, 0.05f, NoV);
+                    n = normalize(lerp(n, geometricNormal, t));
+                }
+            }
+
             // The medium this face opens into, and the one it returns to on the way out — which is what
             // the stack remembers.
             Medium entered = makeDielectricMedium(isWater, max(payloadIor(), 1.0), tint, transmission);
@@ -157,11 +172,11 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             bool chooseReflection = rndf(seed) < F;
             if (chooseReflection) {
                 rd = reflect(rd, n);
-                ro = offsetSurfaceOrigin(hitPos, geometricNormal, rd, SURF_BIAS);
+                ro = offsetSurfaceOrigin(hitPos, n, rd, SURF_BIAS);
             } else {
                 if (dot(transmittedDir, transmittedDir) <= 0.0) break; // TIR with F < 1 cannot happen
                 rd = normalize(transmittedDir);
-                ro = offsetSurfaceOrigin(hitPos, geometricNormal, rd, transmitBias);
+                ro = offsetSurfaceOrigin(hitPos, n, rd, transmitBias);
                 // Crossing into or out of the volume. Absorption is the medium's job from here, so the
                 // tint is NOT also multiplied into the throughput — that would double-count it.
                 if (entering) {
